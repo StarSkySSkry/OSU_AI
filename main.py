@@ -39,5 +39,6 @@ if __name__ == '__main__':
                 start_play()
 
             user_choice = get_validated_input(*get_input_params)
-    
+
+if __name__ == '__main__':
     run()

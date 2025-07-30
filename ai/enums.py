@@ -8,7 +8,7 @@ class EModelType(Enum):
     Combined = 'Combined'
 
 
-class EPlayAreaIndices(Enum):
+class EPlayAreaIndices(Enum):           
     Width = 0
     Height = 1
     OffsetX = 2

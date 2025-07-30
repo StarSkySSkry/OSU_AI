@@ -122,7 +122,7 @@ class ActionsThread(EvalThread):
         _, predicated = torch.max(output, dim=1)
         probs = torch.softmax(output, dim=1)
         prob = probs[0][predicated.item()]
-        if prob.item() > 0:  # 0.7:
+        if prob.item() > 0.7:
             state = predicated.item()
             if state == 0:
                 keyboard.release('x')
