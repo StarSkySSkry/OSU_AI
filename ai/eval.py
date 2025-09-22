@@ -136,54 +136,56 @@ class ActionsThread(EvalThread):
 
 
 class AimThread(EvalThread):
-    def __init__(self, model_id: str, game_window_name: str = DEFAULT_OSU_WINDOW, eval_key: str = '\\'):
+    def __init__(self, model_id: str, game_window_name: str = DEFAULT_OSU_WINDOW, eval_key: str = ''):
         super().__init__(model_id, game_window_name, eval_key)
+        self.smoothing_factor = 0.4 # Value between 0 and 1. Higher is faster, lower is smoother.
 
-    # def get_model(self):
-    #     # model = torch.jit.load(os.path.join(MODELS_DIR, self.model_id, 'model.pt'))
-    #     # model.load_state_dict(torch.load(os.path.join(MODELS_DIR, self.model_id, 'weights.pt')))
-    #     model = AimNet.load(self.model_id)
-    #     model.to(PYTORCH_DEVICE)
-    #     model.eval()
-    #     return model
-    
     def on_eval_ready(self):
         print(f"Aim Model Ready,Press '{self.eval_key}' To Toggle")
 
     def on_output(self, output: Tensor):
-        mouse_x_percent, mouse_y_percent = output[0]
-        position = (int((mouse_x_percent * self.capture_params[EPlayAreaIndices.Width.value]) + self.capture_params[
-            EPlayAreaIndices.OffsetX.value]), int(
-            (mouse_y_percent * self.capture_params[EPlayAreaIndices.Height.value]) + self.capture_params[
-                EPlayAreaIndices.OffsetY.value]))
-        # pyautogui.moveTo(position[0], position[1])
-        if USE_WIN_32_MOUSE:
-            import win32api
-            win32api.SetCursorPos(position)
-        else:
-            mouse.move(position[0],position[1])
+        target_x_percent, target_y_percent = output[0]
+        
+        # Convert model output to absolute screen coordinates
+        target_x = (target_x_percent * self.capture_params[EPlayAreaIndices.Width.value]) + self.capture_params[EPlayAreaIndices.OffsetX.value]
+        target_y = (target_y_percent * self.capture_params[EPlayAreaIndices.Height.value]) + self.capture_params[EPlayAreaIndices.OffsetY.value]
+
+        # Get current mouse position
+        current_x, current_y = mouse.get_position()
+
+        # Linear interpolation (Lerp) for smoothing
+        new_x = current_x + (target_x - current_x) * self.smoothing_factor
+        new_y = current_y + (target_y - current_y) * self.smoothing_factor
+
+        # Move the mouse to the new smoothed position
+        mouse.move(new_x, new_y)
+
+
 
 
 class CombinedThread(EvalThread):
     def __init__(self, model_id: str, game_window_name: str = DEFAULT_OSU_WINDOW, eval_key: str = '\\'):
         super().__init__(model_id, game_window_name, eval_key)
+        self.smoothing_factor = 0.4
 
     def on_eval_ready(self):
         print(f"Combined Model Ready,Press '{self.eval_key}' To Toggle")
 
     def on_output(self, output: Tensor):
-        mouse_x_percent, mouse_y_percent, k1_prob, k2_prob = output[0]
-        position = (int((mouse_x_percent * self.capture_params[EPlayAreaIndices.Width.value]) + self.capture_params[
-            EPlayAreaIndices.OffsetX.value]), int(
-            (mouse_y_percent * self.capture_params[EPlayAreaIndices.Height.value]) + self.capture_params[
-                EPlayAreaIndices.OffsetY.value]))
+        target_x_percent, target_y_percent, k1_prob, k2_prob = output[0]
 
-        if USE_WIN_32_MOUSE:
-            import win32api
-            win32api.SetCursorPos(position)
-        else:
-            mouse.move(position[0],position[1])
+        # --- Mouse control with Lerp smoothing ---
+        target_x = (target_x_percent * self.capture_params[EPlayAreaIndices.Width.value]) + self.capture_params[EPlayAreaIndices.OffsetX.value]
+        target_y = (target_y_percent * self.capture_params[EPlayAreaIndices.Height.value]) + self.capture_params[EPlayAreaIndices.OffsetY.value]
 
+        current_x, current_y = mouse.get_position()
+
+        new_x = current_x + (target_x - current_x) * self.smoothing_factor
+        new_y = current_y + (target_y - current_y) * self.smoothing_factor
+
+        mouse.move(new_x, new_y)
+
+        # --- Keyboard control ---
         if k1_prob >= 0.5:
             keyboard.press('z')
         else:

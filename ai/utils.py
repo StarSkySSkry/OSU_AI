@@ -285,3 +285,45 @@ def playfield_coords_to_screen(
         screen_y -= cap_dy
 
     return [screen_x, screen_y, 0, 0] # 返回的 dx, dy 實際上已經被包含在 x, y 中了
+
+class PID:
+    """一個簡單的 PID 控制器。"""
+    def __init__(self, Kp, Ki, Kd, setpoint=0):
+        self.Kp = Kp
+        self.Ki = Ki
+        self.Kd = Kd
+        self.setpoint = setpoint
+        self._last_error = 0
+        self._integral = 0
+        self._last_time = time.time()
+
+    def update(self, measured_value):
+        current_time = time.time()
+        dt = current_time - self._last_time
+        if dt == 0:
+            return 0
+
+        error = self.setpoint - measured_value
+        
+        # P (Proportional)
+        proportional_term = self.Kp * error
+        
+        # I (Integral)
+        self._integral += error * dt
+        integral_term = self.Ki * self._integral
+        
+        # D (Derivative)
+        derivative = (error - self._last_error) / dt
+        derivative_term = self.Kd * derivative
+        
+        output = proportional_term + integral_term + derivative_term
+        
+        self._last_error = error
+        self._last_time = current_time
+        
+        return output
+
+    def reset(self):
+        self._last_error = 0
+        self._integral = 0
+        self._last_time = time.time()

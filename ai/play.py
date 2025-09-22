@@ -3,7 +3,7 @@ from ai.eval import ActionsThread, AimThread, CombinedThread
 import traceback
 
 
-def start_play():
+def start_play(eval_key: str = '\\'):
     try:
         action_models = get_models(EModelType.Actions)
 
@@ -26,7 +26,7 @@ def start_play():
             model_index = get_validated_input(prompt, lambda a: a.strip().isnumeric() and (
                     0 <= int(a.strip()) < len(aim_models)), lambda a: int(a.strip()))
 
-            active_model = AimThread(model_id=aim_models[model_index]['id'])
+            active_model = AimThread(model_id=aim_models[model_index]['id'], eval_key=eval_key)
 
         elif user_choice == 1:
             prompt = "What actions model would you like to use?\n"
@@ -37,7 +37,7 @@ def start_play():
                     0 <= int(a.strip()) < len(action_models)), lambda a: int(a.strip()))
 
             active_model = ActionsThread(
-                model_id=action_models[model_index]['id'])
+                model_id=action_models[model_index]['id'], eval_key=eval_key)
         else:
             prompt = "What combined model would you like to use?\n"
             for i in range(len(combined_models)):
@@ -47,7 +47,7 @@ def start_play():
                     0 <= int(a.strip()) < len(combined_models)), lambda a: int(a.strip()))
 
             active_model = CombinedThread(
-                model_id=combined_models[model_index]['id'])
+                model_id=combined_models[model_index]['id'], eval_key=eval_key)
 
         try:
             while True:
