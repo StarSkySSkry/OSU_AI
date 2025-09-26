@@ -20,34 +20,12 @@ T = TypeVar("T")
 class Cv2VideoContext:
     def __init__(self, file_path: str):
         self.file_path = file_path
-        self.cap = cv2.VideoCapture(file_path, cv2.CAP_FFMPEG)
-
-    def __enter__(self):
-        if not self.cap.isOpened():
-            raise IOError(f"Error opening video stream or file {self.file_path}")
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.cap.release()
-
-class EventsSampler:
-    """
-    一個高效的事件採樣器，使用二分搜索來快速定位時間戳。
-    它結合了原有的滑鼠和鍵盤採樣邏輯。
-    """
-    def __init__(self, events: list[dict]):
-        # 確保事件按時間排序
-        self.events = sorted(events, key=lambda a: a['time'])
-        # 預先提取時間列表，專用於二分搜索
-        self.event_times = [e['time'] for e in self.events]
-        self.events_num = len(self.events)
-        if self.events_num == 0:
-            raise ValueError("Cannot initialize EventsSampler with an empty list of events.")
-
+        # 搜索找到 target_time_ms 所在的索引區間 [i-1, i]。
+        # 返回的元組代表用於插值的兩個事件的索引。
+        
     def _get_interp_indices(self, target_time_ms: float) -> tuple[int, int]:
         """
-        使用二分搜索找到 target_time_ms 所在的索引區間 [i-1, i]。
-        返回的元組代表用於插值的兩個事件的索引。
+        使用 bisect_left 在排序的 event_times 中高效地找到 target_time_ms 的插值索引。
         """
         # 處理邊界情況
         if target_time_ms <= self.event_times[0]:
@@ -71,8 +49,7 @@ class EventsSampler:
         返回 (時間, x, y)。
         """
         idx1, idx2 = self._get_interp_indices(target_time_ms)
-        
-        # 如果在邊界或時間完全匹配，直接返回事件值
+
         if idx1 == idx2:
             event = self.events[idx1]
             return event['time'], event['x'], event['y']
@@ -80,27 +57,16 @@ class EventsSampler:
         a = self.events[idx1]
         b = self.events[idx2]
         
-        cur_time = a['time']
-        next_time = b['time']
+        t = (target_time_ms - a['time']) / (b['time'] - a['time'])
         
-        # 防止除以零
-        events_dist = next_time - cur_time
-        if events_dist == 0:
-            return cur_time, a['x'], a['y']
-
-        # 計算插值比例 alpha
-        target_time_dist = target_time_ms - cur_time
-        alpha = target_time_dist / events_dist
+        x = a['x'] + t * (b['x'] - a['x'])
+        y = a['y'] + t * (b['y'] - a['y'])
         
-        # 線性插值
-        interp_x = a["x"] + ((b['x'] - a['x']) * alpha)
-        interp_y = a["y"] + ((b['y'] - a['y']) * alpha)
-        
-        return target_time_ms, interp_x, interp_y
+        return target_time_ms, x, y
 
     def sample_keys(self, target_time_ms: float) -> tuple[float, list[bool]]:
         """
-        在給定時間點對按鍵狀態進行最近鄰採樣。
+        在給定時間點對按鍵狀態進行採樣（最近鄰）。
         返回 (時間, [k1_pressed, k2_pressed])。
         """
         idx1, idx2 = self._get_interp_indices(target_time_ms)
@@ -134,53 +100,45 @@ class FixedRuntime:
         return self
 
     def __exit__(self, exc_type, exc_value, exc_traceback):
-        elapsed = time.perf_counter() - self.start_time
-        wait_time = self.delay - elapsed
-        if wait_time > 0:
-            time.sleep(wait_time)
-        
-        if self.debug_name:
-            final_elapsed = time.perf_counter() - self.start_time
-            print(f"Context [{self.debug_name}] elapsed: {final_elapsed:.4f}s")
+        end_time = time.perf_counter()
+        elapsed = end_time - self.start_time
+        remaining = self.delay - elapsed
+        if remaining > 0:
+            time.sleep(remaining)
 
-# 全局變量用於緩存模型列表
-_model_cache = {}
+_model_cache = {EModelType.Aim: [], EModelType.Actions: [], EModelType.Combined: []}
 
 def refresh_model_list():
     """
-    從模型目錄中刷新模型信息列表，並緩存在內存中。
+    刷新模型列表緩存。
     """
     global _model_cache
-    _model_cache = {
-        EModelType.Aim: [],
-        EModelType.Actions: [],
-        EModelType.Combined: []
-    }
-    
-    if not os.path.exists(MODELS_DIR):
+    _model_cache = {EModelType.Aim: [], EModelType.Actions: [], EModelType.Combined: []}
+
+    if not path.exists(MODELS_DIR):
         os.makedirs(MODELS_DIR)
         return
-    
-    for model_id in os.listdir(MODELS_DIR):
-        model_path = os.path.join(MODELS_DIR, model_id)
-        info_path = os.path.join(model_path, 'info.json')
 
-        if os.path.isdir(model_path) and os.path.exists(info_path):
-            try:
-                with open(info_path, 'r') as f:
-                    data = json.load(f)
-                    model_type = EModelType[data['type']]
-                    
-                    payload = {
-                        'id': model_id,
-                        'name': data.get('name', 'Unnamed Model'),
-                        'date': datetime.fromisoformat(data['date']),
-                        'channels': data.get('channels', 'N/A'),
-                        'datasets': data.get('datasets', [])
-                    }
-                    _model_cache[model_type].append(payload)
-            except (json.JSONDecodeError, KeyError, TypeError) as e:
-                print(f"Warning: Could not parse info.json for model {model_id}. Error: {e}")
+    for model_id in listdir(MODELS_DIR):
+        model_dir = path.join(MODELS_DIR, model_id)
+        if path.isdir(model_dir):
+            info_path = path.join(model_dir, 'info.json')
+            if path.exists(info_path):
+                try:
+                    with open(info_path, 'r') as f:
+                        data = json.load(f)
+                        model_type = EModelType[data['type']]
+                        
+                        payload = {
+                            'id': model_id,
+                            'name': data.get('name', 'Unnamed Model'),
+                            'date': datetime.fromisoformat(data['date']),
+                            'channels': data.get('channels', 'N/A'),
+                            'datasets': data.get('datasets', [])
+                        }
+                        _model_cache[model_type].append(payload)
+                except (json.JSONDecodeError, KeyError, TypeError) as e:
+                    print(f"Warning: Could not parse info.json for model {model_id}. Error: {e}")
 
     # 按日期降序排序
     for model_type in _model_cache:
@@ -191,33 +149,12 @@ refresh_model_list()
 
 def get_models(model_type: EModelType) -> list[dict]:
     """獲取指定類型的模型列表。"""
-    return _model_cache.get(model_type, [])
+    return _model_cache[model_type]
 
-def get_datasets() -> list[str]:
-    """獲取所有可用的原始數據集名稱。"""
-    if not os.path.exists(RAW_DATA_DIR):
-        os.makedirs(RAW_DATA_DIR)
-        return []
-    return [d for d in listdir(RAW_DATA_DIR) if os.path.isdir(os.path.join(RAW_DATA_DIR, d))]
-
-def get_validated_input(
-    prompt: str = "You forgot to put your own prompt",
-    validate_fn: Callable[[str], bool] = lambda a: len(a.strip()) != 0,
-    conversion_fn: Callable[[str], T] = lambda a: a.strip(),
-    on_validation_error: Callable[[str], None] = lambda a: print("Invalid input, please try again.")
-) -> T:
+def run_in_subprocess(file_path: str) -> int:
     """
-    一個健壯的函數，用於從用戶那裡獲取經過驗證和轉換的輸入。
+    在子進程中運行指定的 Python 文件。
     """
-    while True:
-        user_input = input(prompt)
-        if validate_fn(user_input):
-            return conversion_fn(user_input)
-        else:
-            on_validation_error(user_input)
-
-def run_file(file_path: str):
-    """在子進程中運行一個 Python 文件。"""
     try:
         process = subprocess.Popen([sys.executable, file_path], shell=False)
         process.communicate()
@@ -246,34 +183,16 @@ def derive_capture_params(window_width=1920, window_height=1080):
     return [capture_width, capture_height, offset_x, offset_y]
 
 def playfield_coords_to_screen(
-    playfield_x: float, playfield_y: float, 
-    screen_w=1920, screen_h=1080, account_for_capture_params=False
-) -> list[float]:
+    playfield_x, playfield_y,
+    screen_w, screen_h,
+    factory_w=512, factory_h=384,
+    factory_dx=0, factory_dy=0,
+    account_for_capture_params=False
+):
     """
-    將 osu! 的內部 playfield 座標轉換為屏幕座標。
-    這段邏輯比較複雜，基於 DANSER 的渲染方式，通常保持不變。
+    將 osu! 遊戲區域座標轉換為螢幕座標。
     """
-    play_field_ratio = 4 / 3
-    screen_ratio = screen_w / screen_h
-
-    play_field_factory_width = 512
-    play_field_factory_height = 384 # 512 / (4/3)
-
-    # DANSER 為了保持比例，會在上下或左右添加黑邊
-    # 這一步是在模擬 DANSER 的縮放行為
-    if screen_ratio > play_field_ratio:
-        # 屏幕更寬，上下有黑邊
-        factory_h = play_field_factory_height
-        factory_w = factory_h * screen_ratio
-    else:
-        # 屏幕更高，左右有黑邊
-        factory_w = play_field_factory_width
-        factory_h = factory_w / screen_ratio
-
-    factory_dx = (factory_w - play_field_factory_width) / 2
-    factory_dy = (factory_h - play_field_factory_height) / 2
-    
-    # 應用縮放和平移
+    # 縮放和平移
     screen_x = (playfield_x * (screen_w / factory_w)) + (factory_dx * (screen_w / factory_w))
     screen_y = (playfield_y * (screen_h / factory_h)) + (factory_dy * (screen_h / factory_h))
     
@@ -287,43 +206,84 @@ def playfield_coords_to_screen(
     return [screen_x, screen_y, 0, 0] # 返回的 dx, dy 實際上已經被包含在 x, y 中了
 
 class PID:
-    """一個簡單的 PID 控制器。"""
-    def __init__(self, Kp, Ki, Kd, setpoint=0):
+    """
+    一個經過優化的 PID 控制器。
+    - 增加了積分飽和保護 (Integral Windup Protection)。
+    - 採用對測量值微分，以避免微分衝擊 (Derivative Kick)。
+    - 增加了輸出限制。
+    """
+    def __init__(self, Kp, Ki, Kd, setpoint=0, output_limits=(-100, 100)):
         self.Kp = Kp
         self.Ki = Ki
         self.Kd = Kd
         self.setpoint = setpoint
-        self._last_error = 0
+        self.output_limits = output_limits
         self._integral = 0
-        self._last_time = time.time()
+        self._last_error = 0
+        self._last_measurement = 0
+        self._last_time = time.perf_counter()
 
     def update(self, measured_value):
-        current_time = time.time()
+        current_time = time.perf_counter()
         dt = current_time - self._last_time
         if dt == 0:
             return 0
 
         error = self.setpoint - measured_value
         
-        # P (Proportional)
+        # 比例項
         proportional_term = self.Kp * error
         
-        # I (Integral)
-        self._integral += error * dt
-        integral_term = self.Ki * self._integral
+        # 積分項 (帶飽和保護)
+        self._integral += self.Ki * error * dt
+        self._integral = max(self.output_limits[0], min(self.output_limits[1], self._integral))
+        integral_term = self._integral
+
+        # 微分項 (對測量值微分)
+        # 這樣可以避免目標點突變時引起的微分衝擊
+        derivative = (measured_value - self._last_measurement) / dt
+        derivative_term = self.Kd * -derivative # 注意這裡有個負號
         
-        # D (Derivative)
-        derivative = (error - self._last_error) / dt
-        derivative_term = self.Kd * derivative
-        
+        # 計算總輸出
         output = proportional_term + integral_term + derivative_term
         
+        # 限制總輸出
+        output = max(self.output_limits[0], min(self.output_limits[1], output))
+
+        # 更新狀態
         self._last_error = error
+        self._last_measurement = measured_value
         self._last_time = current_time
         
         return output
 
     def reset(self):
-        self._last_error = 0
         self._integral = 0
-        self._last_time = time.time()
+        self._last_error = 0
+        self._last_measurement = 0
+        self._last_time = time.perf_counter()
+
+    def set_gains(self, Kp, Ki, Kd):
+        """動態調整PID參數"""
+        self.Kp = Kp
+        self.Ki = Ki
+        self.Kd = Kd
+
+def get_validated_input(prompt: str, is_valid: Callable[[str], bool], convert: Callable[[str], T]) -> T:
+    """
+    Gets a validated input from the user.
+
+    Args:
+        prompt: The prompt to display to the user.
+        is_valid: A function that returns True if the input is valid, False otherwise.
+        convert: A function that converts the valid input string to the desired type.
+
+    Returns:
+        The validated and converted input.
+    """
+    while True:
+        user_input = input(prompt)
+        if is_valid(user_input):
+            return convert(user_input)
+        else:
+            print("Invalid input, please try again.")

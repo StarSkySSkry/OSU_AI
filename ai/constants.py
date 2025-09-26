@@ -28,6 +28,8 @@ FRAME_DELAY = 0.01
 
 MAX_THREADS_FOR_RESIZING = 20
 
+DEFAULT_OSU_WINDOW = "osu!"
+
 if not path.exists(RAW_DATA_DIR):
     makedirs(RAW_DATA_DIR)
 

@@ -1,4 +1,11 @@
 
+import ctypes
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2) # PROCESS_PER_MONITOR_DPI_AWARE
+except (AttributeError, OSError):
+    # This will fail on versions of Windows before 8.1
+    pass
+
 if __name__ == '__main__':
 
     from ai.utils import get_validated_input
@@ -40,5 +47,4 @@ if __name__ == '__main__':
 
             user_choice = get_validated_input(*get_input_params)
 
-if __name__ == '__main__':
     run()

@@ -49,13 +49,12 @@ def start_play(eval_key: str = '\\'):
             active_model = CombinedThread(
                 model_id=combined_models[model_index]['id'], eval_key=eval_key)
 
-        try:
-            while True:
-                with FixedRuntime(2):
-                    pass
+        if active_model:
+            active_model.start()
 
-        except KeyboardInterrupt as e:
-            if active_model is not None:
-                active_model.kill()
+        try:
+            input("\nPress Enter to quit.\n")
+        except KeyboardInterrupt:
+            pass
     except Exception as e:
         traceback.print_exc()

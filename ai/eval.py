@@ -1,126 +1,130 @@
-import os.path
+# ai/eval.py
+
+import json
+import os
 import time
+import traceback
+from collections import deque
+from threading import Thread
+
 import cv2
+import keyboard
+import mouse
 import numpy as np
 import torch
-import keyboard
-from threading import Thread
-from torch import Tensor
-from ai.models import ActionsNet, AimNet, OsuAiModel, CombinedNet
-from ai.constants import FINAL_PLAY_AREA_SIZE, FRAME_DELAY, PYTORCH_DEVICE, MODELS_DIR
-from ai.utils import FixedRuntime, derive_capture_params
-from collections import deque
+import win32api
+import win32gui
 from mss import mss
-from ai.enums import EPlayAreaIndices
-import mouse
-# 'osu!'  #
-DEFAULT_OSU_WINDOW = 'osu!'  # "osu! (development)"
-USE_WIN_32_MOUSE = False
-try:
-    import win32api
-    USE_WIN_32_MOUSE = True
-except:
-    USE_WIN_32_MOUSE = False
+from torch import Tensor, device
+from torch.nn import Module
+
+from ai.constants import (DEFAULT_OSU_WINDOW, FINAL_PLAY_AREA_SIZE,
+                          FRAME_DELAY, MODELS_DIR)
+from ai.enums import EModelType, EPlayAreaIndices
+from ai.utils import (PID, FixedRuntime, derive_capture_params,
+                      playfield_coords_to_screen)
+
 
 class EvalThread(Thread):
-
     def __init__(self, model_id: str, game_window_name: str = DEFAULT_OSU_WINDOW, eval_key: str = '\\'):
-        super().__init__(group=None, daemon=True)
-        self.game_window_name = game_window_name
+        super().__init__()
+        self.daemon = True
         self.model_id = model_id
-        self.capture_params = derive_capture_params()
+        self.game_window_name = game_window_name
         self.eval_key = eval_key
-        self.eval = True
-        self.start()
-
-
-    def get_model(self):
-        model = torch.jit.load(os.path.join(MODELS_DIR, self.model_id, 'model.pt'))
-        model.load_state_dict(torch.load(os.path.join(MODELS_DIR, self.model_id, 'weights.pt')))
-        model.to(PYTORCH_DEVICE)
-        model.eval()
-        return model
+        self.eval = False
+        self.capture_params = []
 
     def on_output(self, output: Tensor):
-        pass
+        raise NotImplementedError
 
     def on_eval_ready(self):
-        print("Unknown Model Ready")
+        raise NotImplementedError
 
-    def kill(self):
-        self.eval = False
+    def _get_capture_params(self):
+        hwnd = win32gui.FindWindow(None, self.game_window_name)
+        if hwnd == 0:
+            # Fallback to primary monitor if window not found
+            s_width = win32api.GetSystemMetrics(0)
+            s_height = win32api.GetSystemMetrics(1)
+            client_left = 0
+            client_top = 0
+        else:
+            # Get client area dimensions and position
+            client_rect = win32gui.GetClientRect(hwnd)
+            s_width = client_rect[2] - client_rect[0]
+            s_height = client_rect[3] - client_rect[1]
+            
+            # Convert client area origin to screen coordinates
+            client_left, client_top = win32gui.ClientToScreen(hwnd, (0, 0))
 
-    @torch.no_grad()
+        capture_width, capture_height, offset_x, offset_y = derive_capture_params(s_width, s_height)
+
+        # Add client area origin to the offsets
+        self.capture_params = [
+            capture_width,
+            capture_height,
+            offset_x + client_left,
+            offset_y + client_top
+        ]
+
     def run(self):
-        eval_model = self.get_model()
-        with torch.inference_mode():
-            frame_buffer = deque(maxlen=eval_model.channels)
-            eval_this_frame = False
+        self._get_capture_params()
+        
+        model_path = os.path.join(MODELS_DIR, self.model_id, 'model.pth')
+        info_path = os.path.join(MODELS_DIR, self.model_id, 'info.json')
 
-            def toggle_eval():
-                nonlocal eval_this_frame
-                eval_this_frame = not eval_this_frame
+        with open(info_path, 'r') as f:
+            info = json.load(f)
 
-            keyboard.add_hotkey(self.eval_key, callback=toggle_eval)
+        eval_model: Module = torch.load(model_path, map_location=device('cpu'))
+        eval_model.eval()
 
-            self.on_eval_ready()
+        frame_buffer = deque(maxlen=eval_model.channels)
+        
+        keyboard.add_hotkey(self.eval_key, lambda: self.toggle_eval(), suppress=True)
+        self.on_eval_ready()
 
-            with mss() as sct:
-                monitor = {"top": self.capture_params[EPlayAreaIndices.OffsetY.value],
-                           "left": self.capture_params[EPlayAreaIndices.OffsetX.value],
-                           "width": self.capture_params[EPlayAreaIndices.Width.value],
-                           "height": self.capture_params[EPlayAreaIndices.Height.value]}
+        with mss() as sct:
+            monitor = {"top": self.capture_params[EPlayAreaIndices.OffsetY.value],
+                       "left": self.capture_params[EPlayAreaIndices.OffsetX.value],
+                       "width": self.capture_params[EPlayAreaIndices.Width.value],
+                       "height": self.capture_params[EPlayAreaIndices.Height.value]}
 
-                while self.eval:
-                    with FixedRuntime(target_time=FRAME_DELAY):  # limit capture to every "FRAME_DELAY" seconds
-                        if eval_this_frame:
-                            frame = np.array(sct.grab(monitor))
-                            frame = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY), FINAL_PLAY_AREA_SIZE)
+            while True:
+                eval_this_frame = self.eval
+                with FixedRuntime(target_time=FRAME_DELAY):
+                    if eval_this_frame:
+                        frame = np.array(sct.grab(monitor))
+                        frame = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY), FINAL_PLAY_AREA_SIZE)
 
-                            needed = eval_model.channels - len(frame_buffer)
+                        needed = eval_model.channels - len(frame_buffer)
 
-                            if needed > 0:
-                                for i in range(needed):
-                                    frame_buffer.append(frame)
-                            else:
+                        if needed > 0:
+                            for i in range(needed):
                                 frame_buffer.append(frame)
-
-                            stacked = np.stack(frame_buffer)
-
+                        else:
                             frame_buffer.append(frame)
-                            # cv2.imshow("Debug", stacked[0:3].transpose(1, 2, 0))
-                            # cv2.waitKey(1)
 
-                            converted_frame = torch.from_numpy(stacked / 255).type(
-                                torch.FloatTensor).to(PYTORCH_DEVICE)
+                        stacked = np.stack(frame_buffer, axis=0)
+                        
+                        with torch.no_grad():
+                            tensor = torch.from_numpy(stacked).unsqueeze(0).float()
+                            output = eval_model(tensor)
+                            self.on_output(output)
 
-                            inputs = converted_frame.reshape(
-                                (1, converted_frame.shape[0], converted_frame.shape[1], converted_frame.shape[2]))
-
-                            out: torch.Tensor = eval_model(inputs)
-
-                            self.on_output(out.detach())
-
-            keyboard.remove_hotkey(toggle_eval)
+    def toggle_eval(self):
+        self.eval = not self.eval
+        print(f'Eval {"Enabled" if self.eval else "Disabled"}')
 
 
 class ActionsThread(EvalThread):
-    KEYS_STATE_TO_STRING = {
-        0: "Idle    ",
-        1: "Button 1",
-        2: "Button 2"
-    }
-
-    def __init__(self, model_id: str, game_window_name: str = DEFAULT_OSU_WINDOW, eval_key: str = '\\'):
-        super().__init__(model_id, game_window_name, eval_key)
-
-
     def on_eval_ready(self):
-        print(f"Actions Model Ready,Press '{self.eval_key}' To Toggle")
+        print(f"Keypress Model Ready, Press '{self.eval_key}' To Toggle")
 
     def on_output(self, output: Tensor):
-        _, predicated = torch.max(output, dim=1)
         probs = torch.softmax(output, dim=1)
+        predicated = torch.argmax(probs, dim=1)
         prob = probs[0][predicated.item()]
         if prob.item() > 0.7:
             state = predicated.item()
@@ -136,54 +140,130 @@ class ActionsThread(EvalThread):
 
 
 class AimThread(EvalThread):
-    def __init__(self, model_id: str, game_window_name: str = DEFAULT_OSU_WINDOW, eval_key: str = ''):
+    def __init__(self, model_id: str, game_window_name: str = DEFAULT_OSU_WINDOW, eval_key: str = '\\'):
         super().__init__(model_id, game_window_name, eval_key)
-        self.smoothing_factor = 0.4 # Value between 0 and 1. Higher is faster, lower is smoother.
+        
+        self.config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'pid_config.json')
+        self._load_pid_config() # 初始載入設定
+
+        # 為 X 和 Y 軸創建獨立的 PID 控制器
+        self.pid_x = PID(self.pid_params['pid_x']['kp'], self.pid_params['pid_x']['ki'], self.pid_params['pid_x']['kd'],
+                         output_limits=(self.pid_params['output_limits']['min'], self.pid_params['output_limits']['max']))
+        self.pid_y = PID(self.pid_params['pid_y']['kp'], self.pid_params['pid_y']['ki'], self.pid_params['pid_y']['kd'],
+                         output_limits=(self.pid_params['output_limits']['min'], self.pid_params['output_limits']['max']))
+
+        # 設定熱重載
+        keyboard.add_hotkey('ctrl+r', self._reload_pid_config)
+        print("PID config loaded. Press 'Ctrl+R' to reload pid_config.json at any time.")
+
+    def _load_pid_config(self):
+        """從 JSON 檔案載入 PID 參數"""
+        try:
+            with open(self.config_path, 'r') as f:
+                self.pid_params = json.load(f)
+            print("PID config loaded successfully.")
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            print(f"Error loading PID config: {e}. Using default values.")
+            self.pid_params = {
+                "pid_x": {"kp": 0.2, "ki": 0.05, "kd": 0.1},
+                "pid_y": {"kp": 0.2, "ki": 0.05, "kd": 0.1},
+                "output_limits": {"min": -50, "max": 50}
+            }
+            
+    def _reload_pid_config(self):
+        """熱重載回呼函數"""
+        print("\nReloading PID config...")
+        self._load_pid_config()
+        self.pid_x.set_gains(self.pid_params['pid_x']['kp'], self.pid_params['pid_x']['ki'], self.pid_params['pid_x']['kd'])
+        self.pid_y.set_gains(self.pid_params['pid_y']['kp'], self.pid_params['pid_y']['ki'], self.pid_params['pid_y']['kd'])
+        self.pid_x.output_limits = (self.pid_params['output_limits']['min'], self.pid_params['output_limits']['max'])
+        self.pid_y.output_limits = (self.pid_params['output_limits']['min'], self.pid_params['output_limits']['max'])
+
 
     def on_eval_ready(self):
-        print(f"Aim Model Ready,Press '{self.eval_key}' To Toggle")
+        print(f"Aim Model Ready, Press '{self.eval_key}' To Toggle")
 
     def on_output(self, output: Tensor):
         target_x_percent, target_y_percent = output[0]
-        
-        # Convert model output to absolute screen coordinates
-        target_x = (target_x_percent * self.capture_params[EPlayAreaIndices.Width.value]) + self.capture_params[EPlayAreaIndices.OffsetX.value]
-        target_y = (target_y_percent * self.capture_params[EPlayAreaIndices.Height.value]) + self.capture_params[EPlayAreaIndices.OffsetY.value]
+        width = self.capture_params[EPlayAreaIndices.Width.value]
+        height = self.capture_params[EPlayAreaIndices.Height.value]
+        offset_x = self.capture_params[EPlayAreaIndices.OffsetX.value]
+        offset_y = self.capture_params[EPlayAreaIndices.OffsetY.value]
 
-        # Get current mouse position
+        # 設定 PID 目標點 (螢幕座標)
+        self.pid_x.setpoint = (target_x_percent * width) + offset_x
+        self.pid_y.setpoint = (target_y_percent * height) + offset_y
+
+        # 獲取當前滑鼠位置
         current_x, current_y = mouse.get_position()
 
-        # Linear interpolation (Lerp) for smoothing
-        new_x = current_x + (target_x - current_x) * self.smoothing_factor
-        new_y = current_y + (target_y - current_y) * self.smoothing_factor
-
-        # Move the mouse to the new smoothed position
-        mouse.move(new_x, new_y)
-
-
+        # 計算 PID 輸出 (需要移動的距離)
+        move_dx = self.pid_x.update(current_x)
+        move_dy = self.pid_y.update(current_y)
+        
+        # 移動滑鼠
+        mouse.move(current_x + move_dx, current_y + move_dy)
 
 
 class CombinedThread(EvalThread):
     def __init__(self, model_id: str, game_window_name: str = DEFAULT_OSU_WINDOW, eval_key: str = '\\'):
         super().__init__(model_id, game_window_name, eval_key)
-        self.smoothing_factor = 0.4
+     
+        self.config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'pid_config.json')
+        self._load_pid_config()
+
+        self.pid_x = PID(self.pid_params['pid_x']['kp'], self.pid_params['pid_x']['ki'], self.pid_params['pid_x']['kd'],
+                         output_limits=(self.pid_params['output_limits']['min'], self.pid_params['output_limits']['max']))
+        self.pid_y = PID(self.pid_params['pid_y']['kp'], self.pid_params['pid_y']['ki'], self.pid_params['pid_y']['kd'],
+                         output_limits=(self.pid_params['output_limits']['min'], self.pid_params['output_limits']['max']))
+
+        keyboard.add_hotkey('ctrl+r', self._reload_pid_config)
+        print("PID config loaded. Press 'Ctrl+R' to reload pid_config.json at any time.")
+
+    def _load_pid_config(self):
+        """從 JSON 檔案載入 PID 參數"""
+        try:
+            with open(self.config_path, 'r') as f:
+                self.pid_params = json.load(f)
+            print("PID config loaded successfully.")
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            print(f"Error loading PID config: {e}. Using default values.")
+            self.pid_params = {
+                "pid_x": {"kp": 0.2, "ki": 0.05, "kd": 0.1},
+                "pid_y": {"kp": 0.2, "ki": 0.05, "kd": 0.1},
+                "output_limits": {"min": -50, "max": 50}
+            }
+
+    def _reload_pid_config(self):
+        """熱重載回呼函數"""
+        print("\nReloading PID config...")
+        self._load_pid_config()
+        self.pid_x.set_gains(self.pid_params['pid_x']['kp'], self.pid_params['pid_x']['ki'], self.pid_params['pid_x']['kd'])
+        self.pid_y.set_gains(self.pid_params['pid_y']['kp'], self.pid_params['pid_y']['ki'], self.pid_params['pid_y']['kd'])
+        self.pid_x.output_limits = (self.pid_params['output_limits']['min'], self.pid_params['output_limits']['max'])
+        self.pid_y.output_limits = (self.pid_params['output_limits']['min'], self.pid_params['output_limits']['max'])
 
     def on_eval_ready(self):
-        print(f"Combined Model Ready,Press '{self.eval_key}' To Toggle")
+        print(f"Full AI Model Ready, Press '{self.eval_key}' To Toggle")
 
     def on_output(self, output: Tensor):
         target_x_percent, target_y_percent, k1_prob, k2_prob = output[0]
+        
+        # --- Mouse control with PID ---
+        width = self.capture_params[EPlayAreaIndices.Width.value]
+        height = self.capture_params[EPlayAreaIndices.Height.value]
+        offset_x = self.capture_params[EPlayAreaIndices.OffsetX.value]
+        offset_y = self.capture_params[EPlayAreaIndices.OffsetY.value]
 
-        # --- Mouse control with Lerp smoothing ---
-        target_x = (target_x_percent * self.capture_params[EPlayAreaIndices.Width.value]) + self.capture_params[EPlayAreaIndices.OffsetX.value]
-        target_y = (target_y_percent * self.capture_params[EPlayAreaIndices.Height.value]) + self.capture_params[EPlayAreaIndices.OffsetY.value]
+        self.pid_x.setpoint = (target_x_percent * width) + offset_x
+        self.pid_y.setpoint = (target_y_percent * height) + offset_y
 
         current_x, current_y = mouse.get_position()
 
-        new_x = current_x + (target_x - current_x) * self.smoothing_factor
-        new_y = current_y + (target_y - current_y) * self.smoothing_factor
-
-        mouse.move(new_x, new_y)
+        move_dx = self.pid_x.update(current_x)
+        move_dy = self.pid_y.update(current_y)
+        
+        mouse.move(current_x + move_dx, current_y + move_dy)
 
         # --- Keyboard control ---
         if k1_prob >= 0.5:
