@@ -111,7 +111,7 @@ class EvalThread(Thread):
                         stacked = np.stack(frame_buffer, axis=0)
 
                         with torch.no_grad():
-                            tensor = torch.from_numpy(stacked).unsqueeze(0).float()
+                            tensor = torch.from_numpy(stacked).unsqueeze(0).float().div_(255.0)
                             output = eval_model(tensor)
                             self.on_output(output)
 
