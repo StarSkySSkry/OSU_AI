@@ -1,10 +1,11 @@
-# ai/eval.py — GPU 加速 + FP16 + 預分配緩衝區 + 零延遲優化版
+# ai/eval.py — GPU 加速 + FP16 + 簡潔高效版
 
 import json
 import os
 import time
 import traceback
 import ctypes
+from collections import deque
 from threading import Thread
 
 import cv2
@@ -26,7 +27,7 @@ from ai.utils import (derive_capture_params,
 
 
 class EvalThread(Thread):
-    """推理基類：GPU 加速、FP16、預分配 tensor 緩衝區。"""
+    """推理基類：GPU 加速、FP16、deque 緩衝。"""
 
     def __init__(self, model_id: str, game_window_name: str = DEFAULT_OSU_WINDOW, eval_key: str = '\\'):
         super().__init__()
@@ -74,7 +75,7 @@ class EvalThread(Thread):
         with open(info_path, 'r') as f:
             info = json.load(f)
 
-        # --- 載入模型到 GPU ---
+        # --- 載入模型到 GPU + FP16 ---
         print(f"Loading model from: {model_path}")
         print(f"Using device: {PYTORCH_DEVICE} | FP16: {USE_FP16}")
         eval_model: Module = torch.jit.load(model_path, map_location=PYTORCH_DEVICE)
@@ -83,26 +84,20 @@ class EvalThread(Thread):
             eval_model.half()
 
         num_channels = eval_model.channels
-        h, w = FINAL_PLAY_AREA_SIZE[1], FINAL_PLAY_AREA_SIZE[0]
         dtype = torch.float16 if USE_FP16 else torch.float32
 
-        # --- 預分配 tensor 緩衝區 (在 GPU 上) ---
-        frame_buffer = torch.zeros((1, num_channels, h, w), dtype=dtype, device=PYTORCH_DEVICE)
-        buffer_filled = 0
-
-        # --- 預分配 pinned memory tensor，加速 CPU→GPU 傳輸 ---
-        pinned_frame = torch.zeros((h, w), dtype=dtype).pin_memory() if PYTORCH_DEVICE.type == 'cuda' else None
-
-        # --- CUDA warmup + 專用 stream ---
+        # --- CUDA warmup ---
         if PYTORCH_DEVICE.type == 'cuda':
-            inference_stream = torch.cuda.Stream()
-            with torch.cuda.stream(inference_stream):
-                with torch.no_grad():
-                    _ = eval_model(frame_buffer)
-            inference_stream.synchronize()
+            dummy = torch.zeros((1, num_channels, FINAL_PLAY_AREA_SIZE[1], FINAL_PLAY_AREA_SIZE[0]),
+                                dtype=dtype, device=PYTORCH_DEVICE)
+            with torch.no_grad():
+                _ = eval_model(dummy)
+            torch.cuda.synchronize()
+            del dummy
             print("CUDA warmup complete.")
-        else:
-            inference_stream = None
+
+        # --- 簡單的 deque 緩衝區（經過驗證最穩定） ---
+        frame_buffer = deque(maxlen=num_channels)
 
         keyboard.add_hotkey(self.eval_key, lambda: self.toggle_eval(), suppress=True)
         self.on_eval_ready()
@@ -116,7 +111,6 @@ class EvalThread(Thread):
         # --- FPS 計數器 ---
         fps_counter = 0
         fps_timer = time.perf_counter()
-        FPS_REPORT_INTERVAL = 2.0
 
         with mss() as sct:
             monitor = {"top": top, "left": left, "width": cap_w, "height": cap_h}
@@ -128,44 +122,33 @@ class EvalThread(Thread):
 
                 # 1. 截圖 → 灰度 → resize
                 raw = np.array(sct.grab(monitor))
-                gray = cv2.resize(
+                frame = cv2.resize(
                     cv2.cvtColor(raw, cv2.COLOR_BGRA2GRAY),
                     FINAL_PLAY_AREA_SIZE
                 )
 
-                # 2. numpy → GPU tensor（pinned memory + non_blocking）
-                if pinned_frame is not None:
-                    pinned_frame.copy_(torch.from_numpy(gray).to(dtype=dtype).div_(255.0))
-                    frame_tensor = pinned_frame.to(device=PYTORCH_DEVICE, non_blocking=True)
+                # 2. 填充 deque
+                if len(frame_buffer) < num_channels:
+                    for _ in range(num_channels - len(frame_buffer)):
+                        frame_buffer.append(frame)
                 else:
-                    frame_tensor = torch.from_numpy(gray).to(device=PYTORCH_DEVICE, dtype=dtype).div_(255.0)
+                    frame_buffer.append(frame)
 
-                # 3. 寫入緩衝區
-                if buffer_filled < num_channels:
-                    for i in range(num_channels):
-                        frame_buffer[0, i] = frame_tensor
-                    buffer_filled = num_channels
-                else:
-                    frame_buffer = torch.roll(frame_buffer, shifts=-1, dims=1)
-                    frame_buffer[0, -1] = frame_tensor
-
-                # 4. 推理（專用 CUDA stream）
-                if inference_stream is not None:
-                    with torch.cuda.stream(inference_stream):
-                        with torch.no_grad():
-                            output = eval_model(frame_buffer)
-                    inference_stream.synchronize()
-                else:
-                    with torch.no_grad():
-                        output = eval_model(frame_buffer)
+                # 3. stack → tensor → GPU → 推理
+                stacked = np.stack(frame_buffer, axis=0)
+                with torch.no_grad():
+                    tensor = torch.from_numpy(stacked).unsqueeze(0).to(
+                        device=PYTORCH_DEVICE, dtype=dtype
+                    ).div_(255.0)
+                    output = eval_model(tensor)
 
                 self.on_output(output.detach().cpu().float())
 
-                # 5. FPS 報告
+                # 4. FPS 報告
                 fps_counter += 1
                 now = time.perf_counter()
                 elapsed = now - fps_timer
-                if elapsed >= FPS_REPORT_INTERVAL:
+                if elapsed >= 2.0:
                     print(f"[Eval] FPS: {fps_counter / elapsed:.1f}")
                     fps_counter = 0
                     fps_timer = now

@@ -6,6 +6,24 @@
 
 ## 2025-02-17
 
+### [v0.4.1] 回退過度優化，恢復穩定版本
+
+**修改檔案**: `ai/eval.py`
+
+**問題**: v0.3.1~v0.4.0 的「優化」反而導致成績從 44.73% 掉到 40.25%（+31 miss）。
+
+**根因分析**:
+- `torch.roll()` 每幀分配新 tensor，比 `clone()` 更慢
+- `pinned_memory` 對 80×60 的小張量開銷 > 收益
+- 獨立 CUDA stream 的 `synchronize()` 反而增加同步等待
+
+**修改內容**: 回退到簡潔版，**保留有效優化，移除有害的**：
+- ✅ 保留：GPU 推理、FP16、CUDA warmup、`SetCursorPos`、`COLOR_BGRA2GRAY`、FPS 計數器
+- ❌ 移除：`torch.roll`、pinned memory、CUDA stream、dxcam
+- 🔄 緩衝區回歸 `deque` + `np.stack`（經驗證最穩定）
+
+---
+
 ### [v0.4.0] dxcam 截圖引擎（取代 mss）
 
 **修改檔案**: `ai/eval.py`
