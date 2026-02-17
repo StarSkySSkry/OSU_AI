@@ -20,10 +20,9 @@ from torch import Tensor, device
 from torch.nn import Module
 
 from ai.constants import (DEFAULT_OSU_WINDOW, FINAL_PLAY_AREA_SIZE,
-                          FRAME_DELAY, MODELS_DIR)
+                          MODELS_DIR)
 from ai.enums import EModelType, EPlayAreaIndices
-from ai.utils import (PID, FixedRuntime, derive_capture_params,
-                      playfield_coords_to_screen)
+from ai.utils import derive_capture_params
 
 
 class EvalThread(Thread):
@@ -94,35 +93,36 @@ class EvalThread(Thread):
                        "height": self.capture_params[EPlayAreaIndices.Height.value]}
 
             while True:
-                eval_this_frame = self.eval
-                with FixedRuntime(target_time=FRAME_DELAY):
-                    if eval_this_frame:
-                        frame = np.array(sct.grab(monitor))
-                        frame = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY), FINAL_PLAY_AREA_SIZE)
+                if not self.eval:
+                    time.sleep(0.001)
+                    continue
 
-                        needed = eval_model.channels - len(frame_buffer)
+                frame = np.array(sct.grab(monitor))
+                frame = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY), FINAL_PLAY_AREA_SIZE)
 
-                        if needed > 0:
-                            for i in range(needed):
-                                frame_buffer.append(frame)
-                        else:
-                            frame_buffer.append(frame)
+                needed = eval_model.channels - len(frame_buffer)
 
-                        stacked = np.stack(frame_buffer, axis=0)
+                if needed > 0:
+                    for i in range(needed):
+                        frame_buffer.append(frame)
+                else:
+                    frame_buffer.append(frame)
 
-                        with torch.no_grad():
-                            tensor = torch.from_numpy(stacked).unsqueeze(0).float().div_(255.0)
-                            output = eval_model(tensor)
-                            self.on_output(output)
+                stacked = np.stack(frame_buffer, axis=0)
 
-                        # FPS 報告
-                        fps_counter += 1
-                        now = time.perf_counter()
-                        elapsed = now - fps_timer
-                        if elapsed >= 2.0:
-                            print(f"[Eval] FPS: {fps_counter / elapsed:.1f}")
-                            fps_counter = 0
-                            fps_timer = now
+                with torch.no_grad():
+                    tensor = torch.from_numpy(stacked).unsqueeze(0).float().div_(255.0)
+                    output = eval_model(tensor)
+                    self.on_output(output)
+
+                # FPS 報告
+                fps_counter += 1
+                now = time.perf_counter()
+                elapsed = now - fps_timer
+                if elapsed >= 2.0:
+                    print(f"[Eval] FPS: {fps_counter / elapsed:.1f}")
+                    fps_counter = 0
+                    fps_timer = now
 
     def toggle_eval(self):
         self.eval = not self.eval
