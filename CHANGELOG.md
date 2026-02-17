@@ -6,6 +6,22 @@
 
 ## 2025-02-17
 
+### [v0.4.0] dxcam 截圖引擎（取代 mss）
+
+**修改檔案**: `ai/eval.py`
+**新增依賴**: `pip install dxcam`
+
+**問題**: `mss.grab()` 被 Windows DWM vsync 限制在 ~33 FPS，這是推理管線的主要瓶頸。
+
+**修改內容**:
+1. **`mss` → `dxcam`** — 使用 DirectX Desktop Duplication API，可達 60-240+ FPS
+2. **`camera.start(target_fps=0)`** — 持續截圖模式，無 FPS 上限
+3. **`get_latest_frame()`** — 每次都取最新幀，跳過舊幀（減少延遲）
+4. **`output_color="GRAY"`** — dxcam 直接輸出灰度，省去 `cv2.cvtColor` 轉換
+5. **`try/finally`** — 確保 `camera.stop()` 被調用，避免資源洩漏
+
+---
+
 ### [v0.3.1] 進一步延遲優化 + FPS 計數器
 
 **修改檔案**: `ai/eval.py`

@@ -1,4 +1,4 @@
-# ai/eval.py — GPU 加速 + FP16 + 預分配緩衝區 + 零延遲優化版
+# ai/eval.py — GPU 加速 + FP16 + dxcam 截圖 + 零延遲優化版
 
 import json
 import os
@@ -8,13 +8,13 @@ import ctypes
 from threading import Thread
 
 import cv2
+import dxcam
 import keyboard
 import mouse
 import numpy as np
 import torch
 import win32api
 import win32gui
-from mss import mss
 from torch import Tensor, device
 from torch.nn import Module
 
@@ -26,7 +26,7 @@ from ai.utils import (derive_capture_params,
 
 
 class EvalThread(Thread):
-    """推理基類：GPU 加速、FP16、預分配 tensor 緩衝區。"""
+    """推理基類：GPU 加速、FP16、dxcam 截圖、預分配 tensor 緩衝區。"""
 
     def __init__(self, model_id: str, game_window_name: str = DEFAULT_OSU_WINDOW, eval_key: str = '\\'):
         super().__init__()
@@ -94,7 +94,7 @@ class EvalThread(Thread):
         pinned_frame = torch.zeros((h, w), dtype=dtype).pin_memory() if PYTORCH_DEVICE.type == 'cuda' else None
 
         if PYTORCH_DEVICE.type == 'cuda':
-            # 創建專用 CUDA stream，避免與其他 GPU 工作互相干擾
+            # 專用 CUDA stream
             inference_stream = torch.cuda.Stream()
             with torch.cuda.stream(inference_stream):
                 with torch.no_grad():
@@ -107,34 +107,38 @@ class EvalThread(Thread):
         keyboard.add_hotkey(self.eval_key, lambda: self.toggle_eval(), suppress=True)
         self.on_eval_ready()
 
-        with mss() as sct:
-            monitor = {
-                "top": self.capture_params[EPlayAreaIndices.OffsetY.value],
-                "left": self.capture_params[EPlayAreaIndices.OffsetX.value],
-                "width": self.capture_params[EPlayAreaIndices.Width.value],
-                "height": self.capture_params[EPlayAreaIndices.Height.value],
-            }
+        # --- dxcam 截圖（DirectX Desktop Duplication API，遠快於 mss） ---
+        left = self.capture_params[EPlayAreaIndices.OffsetX.value]
+        top = self.capture_params[EPlayAreaIndices.OffsetY.value]
+        cap_w = self.capture_params[EPlayAreaIndices.Width.value]
+        cap_h = self.capture_params[EPlayAreaIndices.Height.value]
+        region = (left, top, left + cap_w, top + cap_h)
 
-            # --- FPS 計數器 ---
-            fps_counter = 0
-            fps_timer = time.perf_counter()
-            FPS_REPORT_INTERVAL = 2.0  # 每 2 秒印一次
+        camera = dxcam.create(output_color="GRAY")
+        camera.start(target_fps=0, region=region)  # target_fps=0 = 無上限
+        print(f"dxcam capture started | region: {region}")
 
+        # --- FPS 計數器 ---
+        fps_counter = 0
+        fps_timer = time.perf_counter()
+        FPS_REPORT_INTERVAL = 2.0
+
+        try:
             while True:
                 if not self.eval:
                     time.sleep(0.001)
                     continue
 
-                # 1. 截圖 → numpy 灰度
-                raw = np.array(sct.grab(monitor))
-                gray = cv2.resize(
-                    cv2.cvtColor(raw, cv2.COLOR_BGRA2GRAY),
-                    FINAL_PLAY_AREA_SIZE
-                )
+                # 1. dxcam 截圖（已是灰度 numpy array）
+                frame = camera.get_latest_frame()
+                if frame is None:
+                    continue
+                
+                # dxcam GRAY 輸出 shape: (H, W)，直接 resize
+                gray = cv2.resize(frame, FINAL_PLAY_AREA_SIZE)
 
-                # 2. numpy → GPU tensor（通過 pinned memory 加速）
+                # 2. numpy → GPU tensor（pinned memory + non_blocking）
                 if pinned_frame is not None:
-                    # pinned memory → non_blocking copy → GPU
                     pinned_frame.copy_(torch.from_numpy(gray).to(dtype=dtype).div_(255.0))
                     frame_tensor = pinned_frame.to(device=PYTORCH_DEVICE, non_blocking=True)
                 else:
@@ -149,7 +153,7 @@ class EvalThread(Thread):
                     frame_buffer = torch.roll(frame_buffer, shifts=-1, dims=1)
                     frame_buffer[0, -1] = frame_tensor
 
-                # 4. 推理（在專用 CUDA stream 上）
+                # 4. 推理
                 if inference_stream is not None:
                     with torch.cuda.stream(inference_stream):
                         with torch.no_grad():
@@ -169,6 +173,9 @@ class EvalThread(Thread):
                     print(f"[Eval] FPS: {fps_counter / elapsed:.1f}")
                     fps_counter = 0
                     fps_timer = now
+        finally:
+            camera.stop()
+            del camera
 
     def toggle_eval(self):
         self.eval = not self.eval
@@ -185,7 +192,6 @@ def _move_mouse_absolute(capture_params, target_x_percent, target_y_percent):
     target_x = int((target_x_percent * width) + offset_x)
     target_y = int((target_y_percent * height) + offset_y)
 
-    # 使用 win32api 直接設定絕對座標，比 mouse.move 更快更精準
     ctypes.windll.user32.SetCursorPos(target_x, target_y)
 
 
