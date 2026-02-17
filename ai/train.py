@@ -207,7 +207,7 @@ def train_combined_net(**kwargs):
 
 def get_train_data(data_type: EModelType, all_datasets: list[str], models: list[dict]):
     """從用戶獲取訓練任務的配置。"""
-    project_name = get_validated_input("What would you like to name this project? ")
+    project_name = get_validated_input("What would you like to name this project? ", lambda s: len(s.strip()) > 0, lambda s: s.strip())
     
     # 選擇數據集
     dataset_prompt = "Please select datasets from below, separated by a comma (e.g., 0,2):\n"
