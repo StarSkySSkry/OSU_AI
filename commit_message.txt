@@ -1,0 +1,5 @@
+feat: Integrate PID controller and fix bugs
+
+- Add PID controller for smoother mouse movements.
+- Implement hot-reloading of PID parameters from pid_config.json.
+- Fix various bugs related to file paths, imports, and class names to get the program running.

@@ -77,6 +77,8 @@ class EvalThread(Thread):
         with open(info_path, 'r') as f:
             info = json.load(f)
 
+        print(f"Attempting to load model from: {model_path}")
+        print(f"Does the file exist? {os.path.exists(model_path)}")
         eval_model: Module = torch.load(model_path, map_location=device('cpu'))
         eval_model.eval()
 
