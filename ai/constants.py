@@ -21,6 +21,7 @@ FINAL_IMAGE_HEIGHT = int(FINAL_IMAGE_WIDTH / PLAY_AREA_RATIO)
 FINAL_PLAY_AREA_SIZE = (FINAL_IMAGE_WIDTH, FINAL_IMAGE_HEIGHT)
 
 PYTORCH_DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+USE_FP16 = torch.cuda.is_available()  # FP16 半精度加速（僅 CUDA 有效）
 
 CURRENT_STACK_NUM = 10
 
