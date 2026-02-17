@@ -107,75 +107,123 @@ class EvalThread(Thread):
         keyboard.add_hotkey(self.eval_key, lambda: self.toggle_eval(), suppress=True)
         self.on_eval_ready()
 
-        # --- dxcam 截圖（DirectX Desktop Duplication API，遠快於 mss） ---
+        # --- 截圖引擎：先嘗試 dxcam，失敗則回退到 mss ---
         left = self.capture_params[EPlayAreaIndices.OffsetX.value]
         top = self.capture_params[EPlayAreaIndices.OffsetY.value]
         cap_w = self.capture_params[EPlayAreaIndices.Width.value]
         cap_h = self.capture_params[EPlayAreaIndices.Height.value]
         region = (left, top, left + cap_w, top + cap_h)
 
-        camera = dxcam.create(output_color="GRAY")
-        camera.start(target_fps=0, region=region)  # target_fps=0 = 無上限
-        print(f"dxcam capture started | region: {region}")
+        use_dxcam = False
+        camera = None
+        try:
+            camera = dxcam.create(output_color="GRAY")
+            camera.start(target_fps=0, region=region)
+            use_dxcam = True
+            print(f"[Capture] dxcam OK | region: {region}")
+        except Exception as e:
+            print(f"[Capture] dxcam failed: {e}")
+            print("[Capture] Falling back to mss")
+            if camera is not None:
+                try:
+                    camera.stop()
+                except:
+                    pass
+                camera = None
 
         # --- FPS 計數器 ---
         fps_counter = 0
         fps_timer = time.perf_counter()
         FPS_REPORT_INTERVAL = 2.0
 
+        def _grab_frame_dxcam():
+            """dxcam 截圖：已是灰度，直接 resize"""
+            frame = camera.get_latest_frame()
+            if frame is None:
+                return None
+            return cv2.resize(frame, FINAL_PLAY_AREA_SIZE)
+
+        def _grab_frame_mss(sct, monitor):
+            """mss 截圖：BGRA → 灰度 → resize"""
+            raw = np.array(sct.grab(monitor))
+            return cv2.resize(
+                cv2.cvtColor(raw, cv2.COLOR_BGRA2GRAY),
+                FINAL_PLAY_AREA_SIZE
+            )
+
         try:
-            while True:
-                if not self.eval:
-                    time.sleep(0.001)
-                    continue
+            if use_dxcam:
+                self._run_loop(eval_model, frame_buffer, buffer_filled, num_channels,
+                               dtype, pinned_frame, inference_stream,
+                               lambda: _grab_frame_dxcam(),
+                               fps_counter, fps_timer, FPS_REPORT_INTERVAL)
+            else:
+                from mss import mss
+                with mss() as sct:
+                    monitor = {"top": top, "left": left, "width": cap_w, "height": cap_h}
+                    self._run_loop(eval_model, frame_buffer, buffer_filled, num_channels,
+                                   dtype, pinned_frame, inference_stream,
+                                   lambda: _grab_frame_mss(sct, monitor),
+                                   fps_counter, fps_timer, FPS_REPORT_INTERVAL)
+        finally:
+            if camera is not None:
+                try:
+                    camera.stop()
+                    del camera
+                except:
+                    pass
 
-                # 1. dxcam 截圖（已是灰度 numpy array）
-                frame = camera.get_latest_frame()
-                if frame is None:
-                    continue
-                
-                # dxcam GRAY 輸出 shape: (H, W)，直接 resize
-                gray = cv2.resize(frame, FINAL_PLAY_AREA_SIZE)
+    def _run_loop(self, eval_model, frame_buffer, buffer_filled, num_channels,
+                  dtype, pinned_frame, inference_stream, grab_frame_fn,
+                  fps_counter, fps_timer, FPS_REPORT_INTERVAL):
+        """主推理迴圈（截圖方式由 grab_frame_fn 決定）"""
+        while True:
+            if not self.eval:
+                time.sleep(0.001)
+                continue
 
-                # 2. numpy → GPU tensor（pinned memory + non_blocking）
-                if pinned_frame is not None:
-                    pinned_frame.copy_(torch.from_numpy(gray).to(dtype=dtype).div_(255.0))
-                    frame_tensor = pinned_frame.to(device=PYTORCH_DEVICE, non_blocking=True)
-                else:
-                    frame_tensor = torch.from_numpy(gray).to(device=PYTORCH_DEVICE, dtype=dtype).div_(255.0)
+            # 1. 截圖
+            gray = grab_frame_fn()
+            if gray is None:
+                continue
 
-                # 3. 寫入緩衝區
-                if buffer_filled < num_channels:
-                    for i in range(num_channels):
-                        frame_buffer[0, i] = frame_tensor
-                    buffer_filled = num_channels
-                else:
-                    frame_buffer = torch.roll(frame_buffer, shifts=-1, dims=1)
-                    frame_buffer[0, -1] = frame_tensor
+            # 2. numpy → GPU tensor（pinned memory + non_blocking）
+            if pinned_frame is not None:
+                pinned_frame.copy_(torch.from_numpy(gray).to(dtype=dtype).div_(255.0))
+                frame_tensor = pinned_frame.to(device=PYTORCH_DEVICE, non_blocking=True)
+            else:
+                frame_tensor = torch.from_numpy(gray).to(device=PYTORCH_DEVICE, dtype=dtype).div_(255.0)
 
-                # 4. 推理
-                if inference_stream is not None:
-                    with torch.cuda.stream(inference_stream):
-                        with torch.no_grad():
-                            output = eval_model(frame_buffer)
-                    inference_stream.synchronize()
-                else:
+            # 3. 寫入緩衝區
+            if buffer_filled < num_channels:
+                for i in range(num_channels):
+                    frame_buffer[0, i] = frame_tensor
+                buffer_filled = num_channels
+            else:
+                frame_buffer = torch.roll(frame_buffer, shifts=-1, dims=1)
+                frame_buffer[0, -1] = frame_tensor
+
+            # 4. 推理
+            if inference_stream is not None:
+                with torch.cuda.stream(inference_stream):
                     with torch.no_grad():
                         output = eval_model(frame_buffer)
+                inference_stream.synchronize()
+            else:
+                with torch.no_grad():
+                    output = eval_model(frame_buffer)
 
-                self.on_output(output.detach().cpu().float())
+            self.on_output(output.detach().cpu().float())
 
-                # 5. FPS 報告
-                fps_counter += 1
-                now = time.perf_counter()
-                elapsed = now - fps_timer
-                if elapsed >= FPS_REPORT_INTERVAL:
-                    print(f"[Eval] FPS: {fps_counter / elapsed:.1f}")
-                    fps_counter = 0
-                    fps_timer = now
-        finally:
-            camera.stop()
-            del camera
+            # 5. FPS 報告
+            fps_counter += 1
+            now = time.perf_counter()
+            elapsed = now - fps_timer
+            if elapsed >= FPS_REPORT_INTERVAL:
+                print(f"[Eval] FPS: {fps_counter / elapsed:.1f}")
+                fps_counter = 0
+                fps_timer = now
+
 
     def toggle_eval(self):
         self.eval = not self.eval
