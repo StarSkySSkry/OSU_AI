@@ -6,6 +6,21 @@
 
 ## 2025-02-17
 
+### [v0.3.1] 進一步延遲優化 + FPS 計數器
+
+**修改檔案**: `ai/eval.py`
+
+**問題**: 大幅改善後仍有「慢半拍」的延遲感。
+
+**修改內容**:
+1. **Pinned Memory + `non_blocking=True`** — 預分配 pinned memory tensor，CPU→GPU 傳輸改為非同步，GPU 可以在傳輸進行時開始其他工作。
+2. **專用 CUDA Stream** — 推理在獨立的 `torch.cuda.Stream()` 上執行，避免與其他 GPU 操作互相阻塞。
+3. **FPS 計數器** — 每 2 秒印出 `[Eval] FPS: xx.x`，方便診斷實際吞吐量。
+
+**備註**: 模型訓練時的 `lookahead=3`（`dataset.py` 第 157 行）僅補償 3 幀的延遲。若推理管線總延遲超過 3 幀時間，模型的預測仍會落後。這需要重新訓練時增加 lookahead 值才能根本解決。
+
+---
+
 ### [v0.3.0] 推理延遲優化
 
 **修改檔案**: `ai/eval.py`

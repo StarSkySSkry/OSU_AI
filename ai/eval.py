@@ -87,16 +87,22 @@ class EvalThread(Thread):
         dtype = torch.float16 if USE_FP16 else torch.float32
 
         # --- 預分配 tensor 緩衝區 (在 GPU 上) ---
-        # shape: (1, channels, H, W)，避免每幀重新分配
         frame_buffer = torch.zeros((1, num_channels, h, w), dtype=dtype, device=PYTORCH_DEVICE)
-        buffer_filled = 0  # 追蹤已填入多少幀
+        buffer_filled = 0
 
-        # --- CUDA warmup：預熱 kernel，避免第一幀延遲 ---
+        # --- 預分配 pinned memory tensor，加速 CPU→GPU 傳輸 ---
+        pinned_frame = torch.zeros((h, w), dtype=dtype).pin_memory() if PYTORCH_DEVICE.type == 'cuda' else None
+
         if PYTORCH_DEVICE.type == 'cuda':
-            with torch.no_grad():
-                _ = eval_model(frame_buffer)
-            torch.cuda.synchronize()
+            # 創建專用 CUDA stream，避免與其他 GPU 工作互相干擾
+            inference_stream = torch.cuda.Stream()
+            with torch.cuda.stream(inference_stream):
+                with torch.no_grad():
+                    _ = eval_model(frame_buffer)
+            inference_stream.synchronize()
             print("CUDA warmup complete.")
+        else:
+            inference_stream = None
 
         keyboard.add_hotkey(self.eval_key, lambda: self.toggle_eval(), suppress=True)
         self.on_eval_ready()
@@ -109,37 +115,60 @@ class EvalThread(Thread):
                 "height": self.capture_params[EPlayAreaIndices.Height.value],
             }
 
+            # --- FPS 計數器 ---
+            fps_counter = 0
+            fps_timer = time.perf_counter()
+            FPS_REPORT_INTERVAL = 2.0  # 每 2 秒印一次
+
             while True:
                 if not self.eval:
-                    time.sleep(0.001)  # 未啟用時低功耗等待
+                    time.sleep(0.001)
                     continue
 
-                # 1. 截圖 → numpy 灰度（mss 輸出 BGRA，直接轉灰度）
+                # 1. 截圖 → numpy 灰度
                 raw = np.array(sct.grab(monitor))
                 gray = cv2.resize(
                     cv2.cvtColor(raw, cv2.COLOR_BGRA2GRAY),
                     FINAL_PLAY_AREA_SIZE
                 )
 
-                # 2. numpy → GPU tensor，歸一化
-                frame_tensor = torch.from_numpy(gray).to(
-                    device=PYTORCH_DEVICE, dtype=dtype
-                ).div_(255.0)
+                # 2. numpy → GPU tensor（通過 pinned memory 加速）
+                if pinned_frame is not None:
+                    # pinned memory → non_blocking copy → GPU
+                    pinned_frame.copy_(torch.from_numpy(gray).to(dtype=dtype).div_(255.0))
+                    frame_tensor = pinned_frame.to(device=PYTORCH_DEVICE, non_blocking=True)
+                else:
+                    frame_tensor = torch.from_numpy(gray).to(device=PYTORCH_DEVICE, dtype=dtype).div_(255.0)
 
-                # 3. 寫入預分配緩衝區（GPU 上 in-place 操作）
+                # 3. 寫入緩衝區
                 if buffer_filled < num_channels:
                     for i in range(num_channels):
                         frame_buffer[0, i] = frame_tensor
                     buffer_filled = num_channels
                 else:
-                    # torch.roll 比 slice+clone 更快（GPU kernel 級操作）
                     frame_buffer = torch.roll(frame_buffer, shifts=-1, dims=1)
                     frame_buffer[0, -1] = frame_tensor
 
-                # 4. 推理 → 結果搬回 CPU
-                with torch.no_grad():
-                    output = eval_model(frame_buffer)
+                # 4. 推理（在專用 CUDA stream 上）
+                if inference_stream is not None:
+                    with torch.cuda.stream(inference_stream):
+                        with torch.no_grad():
+                            output = eval_model(frame_buffer)
+                    inference_stream.synchronize()
+                else:
+                    with torch.no_grad():
+                        output = eval_model(frame_buffer)
+
                 self.on_output(output.detach().cpu().float())
+
+                # 5. FPS 報告
+                fps_counter += 1
+                now = time.perf_counter()
+                elapsed = now - fps_timer
+                if elapsed >= FPS_REPORT_INTERVAL:
+                    print(f"[Eval] FPS: {fps_counter / elapsed:.1f}")
+                    fps_counter = 0
+                    fps_timer = now
 
     def toggle_eval(self):
         self.eval = not self.eval
