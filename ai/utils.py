@@ -151,6 +151,12 @@ def get_models(model_type: EModelType) -> list[dict]:
     """獲取指定類型的模型列表。"""
     return _model_cache[model_type]
 
+def get_datasets() -> list[str]:
+    """獲取所有原始數據集名稱（data/raw 下的子資料夾）。"""
+    if not path.exists(RAW_DATA_DIR):
+        return []
+    return [d for d in listdir(RAW_DATA_DIR) if path.isdir(path.join(RAW_DATA_DIR, d))]
+
 def run_in_subprocess(file_path: str) -> int:
     """
     在子進程中運行指定的 Python 文件。
