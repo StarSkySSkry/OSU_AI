@@ -154,7 +154,7 @@ class OsuFrameProcessor:
         
         # --- Lookahead Implementation ---
         # 讓模型學習預測未來，以補償延遲
-        lookahead = 3 # 預測未來 3 個影格的狀態
+        lookahead = 6 # 預測未來 6 個影格的狀態（~200ms @ 30fps）
         
         if len(all_stacked) > lookahead:
             # 圖像使用較早的影格，標籤使用較晚的影格
