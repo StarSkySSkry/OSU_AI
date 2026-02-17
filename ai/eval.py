@@ -1,4 +1,4 @@
-# ai/eval.py — GPU 加速 + FP16 + 簡潔高效版
+# ai/eval.py — 穩定版：CPU 推理 + 直接滑鼠控制
 
 import json
 import os
@@ -20,15 +20,13 @@ from torch import Tensor, device
 from torch.nn import Module
 
 from ai.constants import (DEFAULT_OSU_WINDOW, FINAL_PLAY_AREA_SIZE,
-                          MODELS_DIR, PYTORCH_DEVICE, USE_FP16)
+                          FRAME_DELAY, MODELS_DIR)
 from ai.enums import EModelType, EPlayAreaIndices
-from ai.utils import (derive_capture_params,
+from ai.utils import (PID, FixedRuntime, derive_capture_params,
                       playfield_coords_to_screen)
 
 
 class EvalThread(Thread):
-    """推理基類：GPU 加速、FP16、deque 緩衝。"""
-
     def __init__(self, model_id: str, game_window_name: str = DEFAULT_OSU_WINDOW, eval_key: str = '\\'):
         super().__init__()
         self.daemon = True
@@ -75,83 +73,56 @@ class EvalThread(Thread):
         with open(info_path, 'r') as f:
             info = json.load(f)
 
-        # --- 載入模型到 GPU + FP16 ---
+        # --- 載入模型（CPU，與原始訓練環境一致） ---
         print(f"Loading model from: {model_path}")
-        print(f"Using device: {PYTORCH_DEVICE} | FP16: {USE_FP16}")
-        eval_model: Module = torch.jit.load(model_path, map_location=PYTORCH_DEVICE)
+        eval_model: Module = torch.jit.load(model_path, map_location=device('cpu'))
         eval_model.eval()
-        if USE_FP16:
-            eval_model.half()
 
-        num_channels = eval_model.channels
-        dtype = torch.float16 if USE_FP16 else torch.float32
-
-        # --- CUDA warmup ---
-        if PYTORCH_DEVICE.type == 'cuda':
-            dummy = torch.zeros((1, num_channels, FINAL_PLAY_AREA_SIZE[1], FINAL_PLAY_AREA_SIZE[0]),
-                                dtype=dtype, device=PYTORCH_DEVICE)
-            with torch.no_grad():
-                _ = eval_model(dummy)
-            torch.cuda.synchronize()
-            del dummy
-            print("CUDA warmup complete.")
-
-        # --- 簡單的 deque 緩衝區（經過驗證最穩定） ---
-        frame_buffer = deque(maxlen=num_channels)
+        frame_buffer = deque(maxlen=eval_model.channels)
 
         keyboard.add_hotkey(self.eval_key, lambda: self.toggle_eval(), suppress=True)
         self.on_eval_ready()
-
-        # --- 截圖參數 ---
-        left = self.capture_params[EPlayAreaIndices.OffsetX.value]
-        top = self.capture_params[EPlayAreaIndices.OffsetY.value]
-        cap_w = self.capture_params[EPlayAreaIndices.Width.value]
-        cap_h = self.capture_params[EPlayAreaIndices.Height.value]
 
         # --- FPS 計數器 ---
         fps_counter = 0
         fps_timer = time.perf_counter()
 
         with mss() as sct:
-            monitor = {"top": top, "left": left, "width": cap_w, "height": cap_h}
+            monitor = {"top": self.capture_params[EPlayAreaIndices.OffsetY.value],
+                       "left": self.capture_params[EPlayAreaIndices.OffsetX.value],
+                       "width": self.capture_params[EPlayAreaIndices.Width.value],
+                       "height": self.capture_params[EPlayAreaIndices.Height.value]}
 
             while True:
-                if not self.eval:
-                    time.sleep(0.001)
-                    continue
+                eval_this_frame = self.eval
+                with FixedRuntime(target_time=FRAME_DELAY):
+                    if eval_this_frame:
+                        frame = np.array(sct.grab(monitor))
+                        frame = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY), FINAL_PLAY_AREA_SIZE)
 
-                # 1. 截圖 → 灰度 → resize
-                raw = np.array(sct.grab(monitor))
-                frame = cv2.resize(
-                    cv2.cvtColor(raw, cv2.COLOR_BGRA2GRAY),
-                    FINAL_PLAY_AREA_SIZE
-                )
+                        needed = eval_model.channels - len(frame_buffer)
 
-                # 2. 填充 deque
-                if len(frame_buffer) < num_channels:
-                    for _ in range(num_channels - len(frame_buffer)):
-                        frame_buffer.append(frame)
-                else:
-                    frame_buffer.append(frame)
+                        if needed > 0:
+                            for i in range(needed):
+                                frame_buffer.append(frame)
+                        else:
+                            frame_buffer.append(frame)
 
-                # 3. stack → tensor → GPU → 推理
-                stacked = np.stack(frame_buffer, axis=0)
-                with torch.no_grad():
-                    tensor = torch.from_numpy(stacked).unsqueeze(0).to(
-                        device=PYTORCH_DEVICE, dtype=dtype
-                    ).div_(255.0)
-                    output = eval_model(tensor)
+                        stacked = np.stack(frame_buffer, axis=0)
 
-                self.on_output(output.detach().cpu().float())
+                        with torch.no_grad():
+                            tensor = torch.from_numpy(stacked).unsqueeze(0).float()
+                            output = eval_model(tensor)
+                            self.on_output(output)
 
-                # 4. FPS 報告
-                fps_counter += 1
-                now = time.perf_counter()
-                elapsed = now - fps_timer
-                if elapsed >= 2.0:
-                    print(f"[Eval] FPS: {fps_counter / elapsed:.1f}")
-                    fps_counter = 0
-                    fps_timer = now
+                        # FPS 報告
+                        fps_counter += 1
+                        now = time.perf_counter()
+                        elapsed = now - fps_timer
+                        if elapsed >= 2.0:
+                            print(f"[Eval] FPS: {fps_counter / elapsed:.1f}")
+                            fps_counter = 0
+                            fps_timer = now
 
     def toggle_eval(self):
         self.eval = not self.eval
@@ -170,10 +141,6 @@ def _move_mouse_absolute(capture_params, target_x_percent, target_y_percent):
 
     ctypes.windll.user32.SetCursorPos(target_x, target_y)
 
-
-# ─────────────────────────────────────────────
-# 三種模型的 EvalThread 子類
-# ─────────────────────────────────────────────
 
 class ActionsThread(EvalThread):
     def on_eval_ready(self):
