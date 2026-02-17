@@ -129,6 +129,12 @@ class EvalThread(Thread):
                     camera.stop()
                 except:
                     pass
+                # 強制刪除，避免 __del__ 報錯
+                try:
+                    camera.__dict__['is_capturing'] = False
+                except:
+                    pass
+                del camera
                 camera = None
 
         # --- FPS 計數器 ---
