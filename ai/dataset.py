@@ -167,7 +167,7 @@ class OsuFrameProcessor:
                 stacked, key, coords = OsuFrameProcessor.process_and_stack_frame(frame, state_str, original_dims, frame_queue)
                 
                 if stacked is not None:
-                    all_stacked.append(stacked)
+                    all_stacked.append(stacked.astype(np.float16))  # 立即轉 float16 省記憶體
                     all_keys.append(key)
                     all_coords.append(coords)
             except Exception:
@@ -182,15 +182,22 @@ class OsuFrameProcessor:
         
         if len(all_stacked) > lookahead:
             # 圖像使用較早的影格，標籤使用較晚的影格
-            images_final = all_stacked[:-lookahead]
+            n = len(all_stacked) - lookahead
+            
+            # 增量建立陣列，邊複製邊釋放記憶體（避免雙倍記憶體峰值）
+            images_np = np.empty((n,) + all_stacked[0].shape, dtype=np.float16)
+            for i in range(n):
+                images_np[i] = all_stacked[i]
+                all_stacked[i] = None  # 釋放已複製的幀
+            del all_stacked  # 釋放列表
+            
             keys_final = all_keys[lookahead:]
             coords_final = all_coords[lookahead:]
         else:
-            # 如果數據太少，無法應用 lookahead，則返回空
             print(f"Warning: Not enough frames in {dataset_name} to apply lookahead of {lookahead}. Skipping.")
-            images_final, keys_final, coords_final = [], [], []
+            images_np = np.array([], dtype=np.float16)
+            keys_final, coords_final = [], []
 
-        images_np = np.array(images_final, dtype=np.float16)
         keys_np = np.array(keys_final, dtype=np.int64)
         coords_np = np.array(coords_final, dtype=np.float32)
         
