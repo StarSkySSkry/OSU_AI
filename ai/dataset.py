@@ -24,6 +24,16 @@ KEY_STATES = {
     "10": 2,
 }
 
+# 每種模型類型使用不同的 lookahead（影格數）
+# Aim: 滑鼠移動連續平滑，可以預測較遠
+# Actions: 按鍵是瞬間事件，需要精準時機
+# Combined: 折衷
+LOOKAHEAD_BY_MODEL = {
+    EModelType.Aim: 6,       # ~200ms @ 30fps
+    EModelType.Actions: 2,   # ~67ms @ 30fps
+    EModelType.Combined: 3,  # ~100ms @ 30fps
+}
+
 
 class OsuLazyDataset(Dataset):
     """
@@ -114,12 +124,13 @@ class OsuFrameProcessor:
         return stacked_frames, key_state, mouse_state
 
     @staticmethod
-    def process_raw_dataset(dataset_name: str, force_rebuild=False):
+    def process_raw_dataset(dataset_name: str, lookahead: int = 3, force_rebuild=False):
         """
         處理單個原始數據集文件夾。
         如果存在快取，則加載。如果不存在，則處理並保存快取。
+        快取檔名包含 lookahead 值，不同設定互不覆蓋。
         """
-        processed_data_path = path.join(PROCESSED_DATA_DIR, f"{CURRENT_STACK_NUM}-{FINAL_PLAY_AREA_SIZE[0]}-{dataset_name}.npz")
+        processed_data_path = path.join(PROCESSED_DATA_DIR, f"{CURRENT_STACK_NUM}-{FINAL_PLAY_AREA_SIZE[0]}-la{lookahead}-{dataset_name}.npz")
         raw_data_path = path.join(RAW_DATA_DIR, dataset_name)
 
         if not force_rebuild and path.exists(processed_data_path):
@@ -168,7 +179,6 @@ class OsuFrameProcessor:
         
         # --- Lookahead Implementation ---
         # 讓模型學習預測未來，以補償延遲
-        lookahead = 6 # 預測未來 6 個影格的狀態（~200ms @ 30fps）
         
         if len(all_stacked) > lookahead:
             # 圖像使用較早的影格，標籤使用較晚的影格
@@ -203,8 +213,11 @@ class OsuDatasetBuilder:
         self._coord_chunks = []
         self._cumulative_lengths = [0]
         
+        lookahead = LOOKAHEAD_BY_MODEL.get(label_type, 3)
+        print(f"Using lookahead={lookahead} for {label_type.name} model")
+        
         for ds_name in datasets:
-            images, keys, coords = OsuFrameProcessor.process_raw_dataset(ds_name, force_rebuild)
+            images, keys, coords = OsuFrameProcessor.process_raw_dataset(ds_name, lookahead=lookahead, force_rebuild=force_rebuild)
             if len(images) > 0:
                 self._image_chunks.append(images)
                 self._key_chunks.append(keys)
