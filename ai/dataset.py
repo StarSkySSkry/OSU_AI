@@ -177,25 +177,59 @@ class OsuFrameProcessor:
 class OsuDatasetBuilder:
     """
     負責構建和組織訓練/驗證數據集。
-    這是解決數據洩漏的關鍵。
+    使用分塊存儲，避免將所有資料合併到一個大陣列（節省記憶體）。
     """
     def __init__(self, datasets: list[str], label_type: EModelType, force_rebuild=False):
         self.label_type = label_type
-        all_images, all_keys, all_coords = [], [], []
+        self._image_chunks = []
+        self._key_chunks = []
+        self._coord_chunks = []
+        self._cumulative_lengths = [0]  # 累計長度索引，用於快速查找
         
         for ds_name in datasets:
             images, keys, coords = OsuFrameProcessor.process_raw_dataset(ds_name, force_rebuild)
             if len(images) > 0:
-                all_images.append(images)
-                all_keys.append(keys)
-                all_coords.append(coords)
-            
-        self.images = np.concatenate(all_images, axis=0).astype(np.float16) if all_images else np.array([])
-        self.keys = np.concatenate(all_keys, axis=0) if all_keys else np.array([])
-        self.coords = np.concatenate(all_coords, axis=0) if all_coords else np.array([])
+                self._image_chunks.append(images)
+                self._key_chunks.append(keys)
+                self._coord_chunks.append(coords)
+                self._cumulative_lengths.append(self._cumulative_lengths[-1] + len(images))
+        
+        self._total_len = self._cumulative_lengths[-1]
+        print(f"Total samples loaded: {self._total_len} (across {len(self._image_chunks)} chunks)")
+
+    def _get_chunk_and_index(self, global_idx):
+        """將全局索引轉換為 (chunk_idx, local_idx)"""
+        for chunk_idx in range(len(self._image_chunks)):
+            start = self._cumulative_lengths[chunk_idx]
+            end = self._cumulative_lengths[chunk_idx + 1]
+            if start <= global_idx < end:
+                return chunk_idx, global_idx - start
+        raise IndexError(f"Index {global_idx} out of range [0, {self._total_len})")
+
+    def _get_images_by_indices(self, indices):
+        """按索引列表取得圖像（跨 chunk）"""
+        result = []
+        for idx in indices:
+            c, l = self._get_chunk_and_index(idx)
+            result.append(self._image_chunks[c][l])
+        return np.array(result, dtype=np.float16)
+
+    def _get_keys_by_indices(self, indices):
+        result = []
+        for idx in indices:
+            c, l = self._get_chunk_and_index(idx)
+            result.append(self._key_chunks[c][l])
+        return np.array(result)
+
+    def _get_coords_by_indices(self, indices):
+        result = []
+        for idx in indices:
+            c, l = self._get_chunk_and_index(idx)
+            result.append(self._coord_chunks[c][l])
+        return np.array(result)
 
     def __len__(self):
-        return len(self.images)
+        return self._total_len
 
     def get_train_val_datasets(self, val_split=0.1, random_seed=42):
         """
@@ -209,58 +243,54 @@ class OsuDatasetBuilder:
         val_size = int(val_split * dataset_size)
         train_size = dataset_size - val_size
         
-        # 使用 torch.Generator 確保分割可重現
         generator = torch.Generator().manual_seed(random_seed)
-        train_indices, val_indices = torch.utils.data.random_split(indices, [train_size, val_size], generator=generator)
+        train_subset, val_subset = torch.utils.data.random_split(indices, [train_size, val_size], generator=generator)
+        train_indices = list(train_subset)
+        val_indices = list(val_subset)
 
         # ------------------- 驗證集 (Validation Set) -------------------
-        # 驗證集從不進行過採樣，它必須反映真實數據分佈
-        val_images = self.images[val_indices]
+        print(f"Building validation set ({len(val_indices)} samples)...")
+        val_images = self._get_images_by_indices(val_indices)
         if self.label_type == EModelType.Actions:
-            val_labels = self.keys[val_indices]
+            val_labels = self._get_keys_by_indices(val_indices)
         elif self.label_type == EModelType.Aim:
-            val_labels = self.coords[val_indices]
+            val_labels = self._get_coords_by_indices(val_indices)
         elif self.label_type == EModelType.Combined:
-            k1 = (self.keys[val_indices] == 2).astype(np.float32)[:, None]
-            k2 = (self.keys[val_indices] == 1).astype(np.float32)[:, None]
-            val_labels = np.hstack([self.coords[val_indices], k1, k2])
+            val_keys = self._get_keys_by_indices(val_indices)
+            k1 = (val_keys == 2).astype(np.float32)[:, None]
+            k2 = (val_keys == 1).astype(np.float32)[:, None]
+            val_labels = np.hstack([self._get_coords_by_indices(val_indices), k1, k2])
         
         validation_dataset = OsuDataset(val_images, val_labels, self.label_type)
         print(f"Validation set created with {len(validation_dataset)} samples.")
 
         # ------------------- 訓練集 (Training Set) -------------------
-        train_images_unbalanced = self.images[train_indices]
+        print(f"Building training set ({len(train_indices)} samples)...")
+        train_images_unbalanced = self._get_images_by_indices(train_indices)
         
         if self.label_type == EModelType.Aim:
-            # Aim 模型通常不需要平衡（回歸任務）
-            train_labels = self.coords[train_indices]
+            train_labels = self._get_coords_by_indices(train_indices)
             training_dataset = OsuDataset(train_images_unbalanced, train_labels, self.label_type)
         else:
-            # Actions 和 Combined 模型需要平衡
             print("Balancing training set...")
-            y_to_balance = self.keys[train_indices]
+            y_to_balance = self._get_keys_by_indices(train_indices)
             
-            # imblearn 需要 X 是 2D 的，所以我們先 reshape
             n_samples, n_channels, height, width = train_images_unbalanced.shape
             X_reshaped = train_images_unbalanced.reshape((n_samples, -1))
 
             ros = RandomOverSampler(random_state=random_seed)
             X_resampled_flat, y_resampled_keys = ros.fit_resample(X_reshaped, y_to_balance)
             
-            # 將 X reshape 回原來的形狀
             train_images_balanced = X_resampled_flat.reshape((-1, n_channels, height, width))
             
             if self.label_type == EModelType.Actions:
                 train_labels = y_resampled_keys
             elif self.label_type == EModelType.Combined:
-                # 當樣本被複製時，我們也需要找到它對應的滑鼠座標
-                # 我們可以通過創建一個原始索引的副本來實現
                 original_indices = np.arange(len(train_indices))
                 _, resampled_indices = ros.fit_resample(original_indices.reshape(-1, 1), y_to_balance)
                 resampled_indices = resampled_indices.flatten()
                 
-                # 從原始訓練數據中提取對應的座標
-                coords_resampled = self.coords[train_indices][resampled_indices]
+                coords_resampled = self._get_coords_by_indices([train_indices[i] for i in resampled_indices])
                 
                 k1 = (y_resampled_keys == 2).astype(np.float32)[:, None]
                 k2 = (y_resampled_keys == 1).astype(np.float32)[:, None]
@@ -270,7 +300,6 @@ class OsuDatasetBuilder:
         
         print(f"Training set created with {len(training_dataset)} samples (after balancing).")
         
-        # 打印數據平衡結果
         if self.label_type != EModelType.Aim:
             unique, counts = np.unique(y_resampled_keys, return_counts=True)
             balance_report = dict(zip(map(str, unique), counts))
