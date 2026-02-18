@@ -35,9 +35,7 @@ class OsuDataset(Dataset):
         self.label_type = label_type
 
     def __getitem__(self, idx):
-        # 從 numpy 陣列轉換為 PyTorch 需要的 float tensor
-        # 轉換步驟在 DataLoader 中進行，可以利用多核，這裡直接返回 numpy array
-        image = self.images[idx]
+        image = self.images[idx].astype(np.float32)  # float16 → float32 for training
         label = self.labels[idx]
         return image, label
 
@@ -166,7 +164,7 @@ class OsuFrameProcessor:
             print(f"Warning: Not enough frames in {dataset_name} to apply lookahead of {lookahead}. Skipping.")
             images_final, keys_final, coords_final = [], [], []
 
-        images_np = np.array(images_final, dtype=np.float32)
+        images_np = np.array(images_final, dtype=np.float16)
         keys_np = np.array(keys_final, dtype=np.int64)
         coords_np = np.array(coords_final, dtype=np.float32)
         
@@ -192,7 +190,7 @@ class OsuDatasetBuilder:
                 all_keys.append(keys)
                 all_coords.append(coords)
             
-        self.images = np.concatenate(all_images, axis=0) if all_images else np.array([])
+        self.images = np.concatenate(all_images, axis=0).astype(np.float16) if all_images else np.array([])
         self.keys = np.concatenate(all_keys, axis=0) if all_keys else np.array([])
         self.coords = np.concatenate(all_coords, axis=0) if all_coords else np.array([])
 
