@@ -179,9 +179,9 @@ def _train_model(project_name: str,
     except KeyboardInterrupt:
         print("\nTraining interrupted by user.")
     finally:
-        if get_validated_input("Would you like to save the best model found so far?\n", lambda a: True, lambda a: a.strip().lower()).startswith("y"):
-            print(f"Saving model from epoch {best_epoch+1} with validation loss {best_val_loss:.6f}.")
-            model.save(project_name, datasets, best_epoch, learning_rate, weights=best_state)
+        print(f"\n=== Auto-saving best model (epoch {best_epoch+1}, val_loss={best_val_loss:.6f}) ===")
+        model.save(project_name, datasets, best_epoch, learning_rate, weights=best_state)
+        print("Model saved successfully!")
         writer.close()
 
 def train_action_net(**kwargs):
