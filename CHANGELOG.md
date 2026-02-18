@@ -4,6 +4,49 @@
 
 ---
 
+## 2025-02-18
+
+### [v0.6.0] 訓練管線優化 + 環境可攜性
+
+**修改檔案**: `ai/dataset.py`, `ai/train.py`, `ai/utils.py`, `requirements.txt`
+
+**修改內容**:
+
+1. **`lookahead` 3 → 6** (`dataset.py`) — 模型改為預測未來 6 幀（~200ms @ 30fps），更好地補償推理管線延遲
+2. **補全 `get_datasets()` 函數** (`utils.py`) — `train.py` import 的函數不存在，導致無法訓練。新增函數列出 `data/raw` 下的所有子資料夾
+3. **修正 `get_validated_input` 呼叫** (`train.py:210`) — project name 輸入缺少必要的驗證參數
+4. **訓練完自動保存** (`train.py`) — 移除手動確認提示，`finally` 區塊自動保存最佳模型
+5. **float16 存儲** (`dataset.py`) — 圖像資料改用 `np.float16` 儲存（記憶體減半），`__getitem__` 時自動轉回 float32 訓練
+6. **分塊 Dataset** (`dataset.py`) — 不再將所有 dataset `np.concatenate` 成一個巨大陣列（原本 10.2 GB OOM！），改為分塊保存，使用累計索引查找
+7. **更新 `requirements.txt`** — 新增缺少的 `imbalanced-learn`, `mouse`, `tensorboard`, `scikit-learn`，版本改為彈性範圍
+
+---
+
+### [v0.5.2] 移除 FixedRuntime 人為延遲
+
+**修改檔案**: `ai/eval.py`
+
+**問題**: `FixedRuntime(FRAME_DELAY=0.01)` 每幀強制至少 10ms sleep，在 mss 已花 ~33ms 的情況下多加不必要延遲。
+
+**修改內容**:
+- 移除 `FixedRuntime` 包裹，迴圈全速運行
+- 未啟用時用 `time.sleep(0.001)` 低功耗等待
+- 清理未使用的 import（`FRAME_DELAY`, `FixedRuntime`, `PID`）
+
+---
+
+### [v0.5.1] 修復 /255 歸一化遺漏
+
+**修改檔案**: `ai/eval.py`
+
+**問題**: v0.5.0 回退時移除了 `/255.0` 歸一化。模型訓練時使用 `gray_frame / 255.0`（`dataset.py:82`），期望 0-1 範圍輸入。沒有 `/255` 的 0-255 輸入導致模型輸出垃圾值 → **滑鼠在四個角瘋狂跳動**。
+
+**修改內容**: `tensor = torch.from_numpy(stacked).unsqueeze(0).float().div_(255.0)`
+
+**教訓**: 推理的前處理必須與訓練完全一致。
+
+---
+
 ## 2025-02-17
 
 ### [v0.5.0] 回歸原始推理邏輯（CPU）
