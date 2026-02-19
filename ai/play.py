@@ -1,5 +1,5 @@
 from ai.utils import FixedRuntime, get_models, get_validated_input, EModelType
-from ai.eval import ActionsThread, AimThread, CombinedThread
+from ai.eval import ActionsThread, AimThread, CombinedThread, DualEvalThread
 import traceback
 
 
@@ -39,13 +39,13 @@ def start_play(eval_key: str = '\\'):
             action_idx = get_validated_input(prompt, lambda a: a.strip().isnumeric() and (
                     0 <= int(a.strip()) < len(action_models)), lambda a: int(a.strip()))
 
-            # 兩個線程用同一個 eval_key 控制
-            aim_thread = AimThread(model_id=aim_models[aim_idx]['id'], eval_key=eval_key)
-            action_thread = ActionsThread(model_id=action_models[action_idx]['id'], eval_key=eval_key)
-
-            aim_thread.start()
-            action_thread.start()
-            print(f"\n[Dual Mode] Aim + Actions running. Press '{eval_key}' to toggle both.")
+            # 單線程共用截圖，避免兩個 mss.grab() 搶資源
+            dual_thread = DualEvalThread(
+                aim_model_id=aim_models[aim_idx]['id'],
+                actions_model_id=action_models[action_idx]['id'],
+                eval_key=eval_key
+            )
+            dual_thread.start()
 
         else:
             active_model = None

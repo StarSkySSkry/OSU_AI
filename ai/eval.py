@@ -190,3 +190,137 @@ class CombinedThread(EvalThread):
             keyboard.press('x')
         else:
             keyboard.release('x')
+
+
+class DualEvalThread(Thread):
+    """
+    雙模型推理線程：一次截圖，同時跑 Aim + Actions 兩個模型。
+    避免兩個 mss.grab() 搶資源導致 FPS 下降。
+    """
+    def __init__(self, aim_model_id: str, actions_model_id: str,
+                 game_window_name: str = DEFAULT_OSU_WINDOW, eval_key: str = '\\'):
+        super().__init__()
+        self.daemon = True
+        self.aim_model_id = aim_model_id
+        self.actions_model_id = actions_model_id
+        self.game_window_name = game_window_name
+        self.eval_key = eval_key
+        self.eval = False
+        self.capture_params = []
+
+    def _get_capture_params(self):
+        hwnd = win32gui.FindWindow(None, self.game_window_name)
+        if hwnd == 0:
+            s_width = win32api.GetSystemMetrics(0)
+            s_height = win32api.GetSystemMetrics(1)
+            client_left = 0
+            client_top = 0
+        else:
+            client_rect = win32gui.GetClientRect(hwnd)
+            s_width = client_rect[2] - client_rect[0]
+            s_height = client_rect[3] - client_rect[1]
+            client_left, client_top = win32gui.ClientToScreen(hwnd, (0, 0))
+
+        capture_width, capture_height, offset_x, offset_y = derive_capture_params(s_width, s_height)
+
+        self.capture_params = [
+            capture_width,
+            capture_height,
+            offset_x + client_left,
+            offset_y + client_top
+        ]
+
+    def toggle_eval(self):
+        self.eval = not self.eval
+        print(f'Eval {"Enabled" if self.eval else "Disabled"}')
+
+    def run(self):
+        self._get_capture_params()
+
+        # --- 載入兩個模型 ---
+        aim_path = os.path.join(MODELS_DIR, self.aim_model_id, 'model.pt')
+        actions_path = os.path.join(MODELS_DIR, self.actions_model_id, 'model.pt')
+
+        print(f"Loading Aim model from: {aim_path}")
+        aim_model: Module = torch.jit.load(aim_path, map_location=device('cpu'))
+        aim_model.eval()
+
+        print(f"Loading Actions model from: {actions_path}")
+        actions_model: Module = torch.jit.load(actions_path, map_location=device('cpu'))
+        actions_model.eval()
+
+        # 各自的幀緩衝區（模型的 channels 可能不同）
+        aim_buffer = deque(maxlen=aim_model.channels)
+        actions_buffer = deque(maxlen=actions_model.channels)
+
+        keyboard.add_hotkey(self.eval_key, lambda: self.toggle_eval(), suppress=True)
+        print(f"[Dual Mode] Aim + Actions Ready, Press '{self.eval_key}' To Toggle")
+
+        fps_counter = 0
+        fps_timer = time.perf_counter()
+
+        with mss() as sct:
+            monitor = {"top": self.capture_params[EPlayAreaIndices.OffsetY.value],
+                       "left": self.capture_params[EPlayAreaIndices.OffsetX.value],
+                       "width": self.capture_params[EPlayAreaIndices.Width.value],
+                       "height": self.capture_params[EPlayAreaIndices.Height.value]}
+
+            while True:
+                if not self.eval:
+                    time.sleep(0.001)
+                    continue
+
+                # === 一次截圖，兩個模型共用 ===
+                frame = np.array(sct.grab(monitor))
+                frame = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY), FINAL_PLAY_AREA_SIZE)
+
+                # --- Aim 推理 ---
+                needed = aim_model.channels - len(aim_buffer)
+                if needed > 0:
+                    for i in range(needed):
+                        aim_buffer.append(frame)
+                else:
+                    aim_buffer.append(frame)
+
+                aim_stacked = np.stack(aim_buffer, axis=0)
+                with torch.no_grad():
+                    aim_tensor = torch.from_numpy(aim_stacked).unsqueeze(0).float().div_(255.0)
+                    aim_output = aim_model(aim_tensor)
+                    target_x, target_y = aim_output[0]
+                    _move_mouse_absolute(self.capture_params, target_x.item(), target_y.item())
+
+                # --- Actions 推理 ---
+                needed = actions_model.channels - len(actions_buffer)
+                if needed > 0:
+                    for i in range(needed):
+                        actions_buffer.append(frame)
+                else:
+                    actions_buffer.append(frame)
+
+                actions_stacked = np.stack(actions_buffer, axis=0)
+                with torch.no_grad():
+                    actions_tensor = torch.from_numpy(actions_stacked).unsqueeze(0).float().div_(255.0)
+                    actions_output = actions_model(actions_tensor)
+                    probs = torch.softmax(actions_output, dim=1)
+                    predicted = torch.argmax(probs, dim=1)
+                    prob = probs[0][predicted.item()]
+                    if prob.item() > 0.7:
+                        state = predicted.item()
+                        if state == 0:
+                            keyboard.release('x')
+                            keyboard.release('z')
+                        elif state == 1:
+                            keyboard.release('z')
+                            keyboard.press('x')
+                        elif state == 2:
+                            keyboard.release('x')
+                            keyboard.press('z')
+
+                # FPS 報告
+                fps_counter += 1
+                now = time.perf_counter()
+                elapsed = now - fps_timer
+                if elapsed >= 2.0:
+                    print(f"[Dual] FPS: {fps_counter / elapsed:.1f}")
+                    fps_counter = 0
+                    fps_timer = now
