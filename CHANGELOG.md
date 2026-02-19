@@ -4,6 +4,67 @@
 
 ---
 
+## 2025-02-19 ~ 02-20
+
+### [v0.8.0] 雙模型推理 + 分模型 Lookahead
+
+**修改檔案**: `ai/eval.py`, `ai/play.py`, `ai/dataset.py`
+
+**問題**: Combined 模型用 MSE Loss 同時學座標和按鍵，座標損失主導梯度 → **模型幾乎不學按鍵**（2% 準確率、1050 miss）。Dual Mode（兩線程各自截圖）搶 mss 資源 → FPS 29→19。
+
+**修改內容**:
+
+1. **分模型 Lookahead** (`dataset.py`) — 不同模型類型使用不同 lookahead：
+   - Aim: 6 幀（~200ms）— 滑鼠移動連續可預測
+   - Actions: 2 幀（~67ms）— 按鍵是瞬間事件，需精準
+   - Combined: 3 幀（折衷）
+   - 快取檔名加入 `la{N}` 避免覆蓋
+2. **`DualEvalThread`** (`eval.py`) — 單線程共用截圖，序列跑兩個模型：
+   - 一次 `mss.grab(30ms)` → Aim 推理(4ms) → Actions 推理(4ms)
+   - FPS: 19 → 21（vs 單模型 29）
+3. **推理選單** (`play.py`) — 新增 `[3] Dual Mode`，選 Aim + Actions 模型同時運行
+
+---
+
+### [v0.7.1] 回退管線化截圖
+
+**修改檔案**: `ai/eval.py`
+
+**問題**: v0.7.0 引入的 `ScreenCaptureThread` 使用 busy-wait 跳過重複幀（`if frame is last_frame: continue`），無 sleep 的空轉吃光 CPU → FPS 從 29 暴跌至 10。
+
+**修改內容**: 移除 `ScreenCaptureThread`，回歸串行截圖+推理。
+
+**教訓**: 忙碌等待會搶走其他線程的 CPU 時間。
+
+---
+
+### [v0.7.0] 管線化截圖（實驗性，已回退）
+
+**修改檔案**: `ai/eval.py`
+
+**問題**: 嘗試用獨立線程截圖，推理線程讀最新幀。理論上可重疊 30ms 截圖和 4ms 推理。
+
+**結果**: 因 busy-wait 問題 FPS 反而暴跌，已在 v0.7.1 回退。
+
+---
+
+### [v0.6.1] 修復訓練記憶體不足（OOM）
+
+**修改檔案**: `ai/dataset.py`
+
+**問題**: 兩處 OOM：
+1. `np.concatenate` 合併所有 dataset 需要 5-10 GB 連續記憶體
+2. `process_raw_dataset` 收集 float32 幀列表 + 轉 float16 = 雙倍峰值
+
+**修改內容**:
+1. **懶加載 Dataset** (`OsuLazyDataset`) — 只存索引，`__getitem__` 時才從 chunk 讀取。完全不合併大陣列
+2. **即時轉 float16** — 幀處理時立即轉 float16（96KB/幀 vs 192KB/幀）
+3. **增量陣列建立** — `np.empty` 預分配 + 逐幀填入 + 逐幀釋放舊記憶體
+4. **索引過採樣** — `RandomOverSampler` 只複製索引，不複製圖像資料
+5. 記憶體：**~10 GB → ~2 GB**
+
+---
+
 ## 2025-02-18
 
 ### [v0.6.0] 訓練管線優化 + 環境可攜性
