@@ -212,15 +212,28 @@ def playfield_coords_to_screen(
 ):
     """
     將 osu! 遊戲區域座標轉換為螢幕座標。
+    精準對應 Danser 的 Camera Projection (80% 縮放 + 8單位下移)。
     """
     if account_for_capture_params:
         cap_w, cap_h, cap_dx, cap_dy = derive_capture_params(screen_w, screen_h)
-        # Map squarely into the 4:3 cropped region (e.g. 1440x1080)
-        # This keeps the output target directly inside the newly captured Bounding Box
-        screen_x = (playfield_x * (cap_w / factory_w)) + (factory_dx * (cap_w / factory_w))
-        screen_y = (playfield_y * (cap_h / factory_h)) + (factory_dy * (cap_h / factory_h))
+        
+        # 1. 取得 Danser 基礎縮小比例 (Playfield 佔螢幕高 0.8 倍)
+        base_scale = cap_h / factory_h
+        if (factory_w / factory_h) > (cap_w / cap_h):
+            base_scale = cap_w / factory_w
+        scl = base_scale * 0.8
+        
+        # 2. 將原點移至中心
+        origin_x, origin_y = -factory_w/2, -factory_h/2
+        
+        # 3. Y 軸固定偏移 8 單位 (為血條留空間)
+        shift_y = 8 * scl
+        
+        # 4. 投影到 Capture 擷取框內的相對座標
+        screen_x = (playfield_x + origin_x) * scl + cap_w/2
+        screen_y = (playfield_y + origin_y) * scl + cap_h/2 + shift_y
     else:
-        # 縮放和平移 (Full screen stretched)
+        # Full screen stretched (舊版相容或全螢幕)
         screen_x = (playfield_x * (screen_w / factory_w)) + (factory_dx * (screen_w / factory_w))
         screen_y = (playfield_y * (screen_h / factory_h)) + (factory_dy * (screen_h / factory_h))
 
