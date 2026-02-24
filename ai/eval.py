@@ -160,18 +160,20 @@ class EvalThread(Thread):
                         last_process_time = time.perf_counter()
 
                 now = time.perf_counter()
+                # Windows time.sleep() is disastrous for latency (15.6ms intervals!).
+                # Use a precise busy-wait to guarantee mathematically perfect 16.6ms (60 FPS) pacing.
                 if now - last_process_time < target_frame_time:
-                    time.sleep(0.001)
+                    pass  # Busy-wait loop for <1ms latency tracking
                     continue
 
                 frame = camera.get_latest_frame()
                 if frame is None:
-                    time.sleep(0.001)
                     continue
                 
-                last_process_time = now # Update only when we got a frame
+                last_process_time = time.perf_counter() # Update exactly when frame acquired
 
-                frame = cv2.resize(frame, FINAL_PLAY_AREA_SIZE, interpolation=cv2.INTER_AREA)
+                # cv2.INTER_AREA is slow (~6ms). cv2.INTER_LINEAR is blazing fast (~1ms).
+                frame = cv2.resize(frame, FINAL_PLAY_AREA_SIZE, interpolation=cv2.INTER_LINEAR)
 
                 needed = eval_model.channels - len(frame_buffer)
 
