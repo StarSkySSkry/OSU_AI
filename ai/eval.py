@@ -28,13 +28,13 @@ from ai.utils import derive_capture_params
 def find_osu_window(base_name: str) -> int:
     """Find the game window even if its title changes during gameplay (e.g. 'osu!  - Artist - Title')"""
     hwnd = win32gui.FindWindow(None, base_name)
-    if hwnd != 0:
+    if hwnd != 0 and not win32gui.IsIconic(hwnd):
         return hwnd
     
     found_hwnd = 0
     def enum_windows_callback(h, lparam):
         nonlocal found_hwnd
-        if win32gui.IsWindowVisible(h):
+        if win32gui.IsWindowVisible(h) and not win32gui.IsIconic(h):
             title = win32gui.GetWindowText(h)
             if title.startswith(base_name):
                 found_hwnd = h
@@ -91,17 +91,15 @@ class EvalThread(Thread):
 
     def _get_capture_params(self):
         hwnd = find_osu_window(self.game_window_name)
-        if hwnd == 0:
-            print(f"[Warning] Could not find game window starting with '{self.game_window_name}'. Defaulting to primary monitor!")
-            s_width = win32api.GetSystemMetrics(0)
-            s_height = win32api.GetSystemMetrics(1)
-            client_left = 0
-            client_top = 0
-        else:
-            client_rect = win32gui.GetClientRect(hwnd)
-            s_width = client_rect[2] - client_rect[0]
-            s_height = client_rect[3] - client_rect[1]
-            client_left, client_top = win32gui.ClientToScreen(hwnd, (0, 0))
+        while hwnd == 0:
+            print(f"[Wait] Waiting for '{self.game_window_name}' to be open and un-minimized on screen...")
+            time.sleep(2)
+            hwnd = find_osu_window(self.game_window_name)
+
+        client_rect = win32gui.GetClientRect(hwnd)
+        s_width = client_rect[2] - client_rect[0]
+        s_height = client_rect[3] - client_rect[1]
+        client_left, client_top = win32gui.ClientToScreen(hwnd, (0, 0))
 
         capture_width, capture_height, offset_x, offset_y = derive_capture_params(s_width, s_height)
 
@@ -290,17 +288,15 @@ class DualEvalThread(Thread):
 
     def _get_capture_params(self):
         hwnd = find_osu_window(self.game_window_name)
-        if hwnd == 0:
-            print(f"[Warning] Could not find game window starting with '{self.game_window_name}'. Defaulting to primary monitor!")
-            s_width = win32api.GetSystemMetrics(0)
-            s_height = win32api.GetSystemMetrics(1)
-            client_left = 0
-            client_top = 0
-        else:
-            client_rect = win32gui.GetClientRect(hwnd)
-            s_width = client_rect[2] - client_rect[0]
-            s_height = client_rect[3] - client_rect[1]
-            client_left, client_top = win32gui.ClientToScreen(hwnd, (0, 0))
+        while hwnd == 0:
+            print(f"[Wait] Waiting for '{self.game_window_name}' to be open and un-minimized on screen...")
+            time.sleep(2)
+            hwnd = find_osu_window(self.game_window_name)
+
+        client_rect = win32gui.GetClientRect(hwnd)
+        s_width = client_rect[2] - client_rect[0]
+        s_height = client_rect[3] - client_rect[1]
+        client_left, client_top = win32gui.ClientToScreen(hwnd, (0, 0))
 
         capture_width, capture_height, offset_x, offset_y = derive_capture_params(s_width, s_height)
 
