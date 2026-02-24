@@ -119,9 +119,10 @@ class EvalThread(Thread):
         with open(info_path, 'r') as f:
             info = json.load(f)
 
-        # --- 載入模型（CPU，與原始訓練環境一致） ---
-        print(f"Loading model from: {model_path}")
-        eval_model: Module = torch.jit.load(model_path, map_location=device('cpu'))
+        # --- 載入模型（切換至 GPU 加速） ---
+        print(f"Loading model from: {model_path} onto CUDA")
+        eval_model: Module = torch.jit.load(model_path, map_location=torch.device('cuda'))
+        eval_model = eval_model.to('cuda')
         eval_model.eval()
 
         frame_buffer = deque(maxlen=eval_model.channels)
@@ -183,11 +184,16 @@ class EvalThread(Thread):
                 stacked = np.stack(frame_buffer, axis=0)
 
                 with torch.inference_mode(): # Faster than no_grad
-                    # More efficient tensor creation
-                    tensor = torch.as_tensor(stacked, dtype=torch.float32).unsqueeze(0)
-                    tensor.div_(255.0) # In-place division
-                    output = eval_model(tensor)
-                    self.on_output(output)
+                    # We send integer frames to GPU immediately, then cast to fp32/16 and divide IN GPU memory.
+                    # This prevents the CPU from doing a massive 120x160x10 floating point array division!
+                    tensor = torch.as_tensor(stacked, dtype=torch.uint8, device='cuda').unsqueeze(0)
+                    tensor = tensor.to(dtype=torch.float16).div_(255.0) 
+                    
+                    with torch.autocast(device_type='cuda', dtype=torch.float16):
+                        output = eval_model(tensor)
+                        
+                    # Move output back to CPU for mouse control / keypress matching
+                    self.on_output(output.cpu())
 
                 # FPS 報告
                 fps_counter += 1
