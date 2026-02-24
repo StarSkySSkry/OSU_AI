@@ -157,25 +157,53 @@ class OsuFrameProcessor:
         first_frame = cv2.imread(path.join(raw_data_path, files_to_load[0]))
         original_dims = first_frame.shape[:2][::-1]
 
-        loading_bar = tqdm(desc=f"Processing [{dataset_name}]", total=len(files_to_load))
-        
-        for filename in files_to_load:
+        def _worker(filename):
             try:
                 frame = cv2.imread(path.join(raw_data_path, filename), cv2.IMREAD_COLOR)
-                state_str = filename[:-4].split(os.sep)[-1] # 確保只取檔名部分
+                if frame is None:
+                    return None
+                    
+                # 1. Resize
+                resized_frame = cv2.resize(frame, FINAL_PLAY_AREA_SIZE, interpolation=cv2.INTER_AREA)
                 
-                stacked, key, coords = OsuFrameProcessor.process_and_stack_frame(frame, state_str, original_dims, frame_queue)
-                
-                if stacked is not None:
-                    all_stacked.append(stacked.astype(np.float16))  # 立即轉 float16 省記憶體
-                    all_keys.append(key)
-                    all_coords.append(coords)
-            except Exception:
-                traceback.print_exc()
-            finally:
-                loading_bar.update()
+                # 2. Grayscale & Normalize
+                gray_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2GRAY)
+                normalized_frame = (gray_frame / 255.0).astype(np.float32)
 
-        loading_bar.close()
+                state_str = filename[:-4].split(os.sep)[-1]
+                return normalized_frame, state_str
+            except Exception:
+                return None
+
+        print(f"Loading and resizing frames for [{dataset_name}]...")
+        with ThreadPoolExecutor(max_workers=os.cpu_count() or 8) as executor:
+            # list() to ensure we collect results in the original sorted order
+            processed_frames_data = list(tqdm(executor.map(_worker, files_to_load), total=len(files_to_load)))
+
+        print(f"Stacking frames for [{dataset_name}]...")
+        for result in tqdm(processed_frames_data, total=len(processed_frames_data)):
+            if result is None:
+                continue
+                
+            normalized_frame, state_str = result
+            
+            # --- 3. 解析檔名信息 ---
+            key_state, mouse_state = OsuFrameProcessor.extract_info_from_state(state_str, original_dims)
+            
+            # --- 4. 堆疊影格 ---
+            if len(frame_queue) < CURRENT_STACK_NUM - 1:
+                frame_queue.append(normalized_frame)
+                continue
+            
+            all_frames = list(frame_queue) + [normalized_frame]
+            stacked = np.stack(all_frames, axis=0) # shape: (C, H, W)
+            
+            frame_queue.append(normalized_frame)
+            
+            all_stacked.append(stacked.astype(np.float16))
+            all_keys.append(key_state)
+            all_coords.append(mouse_state)
+
         
         # --- Lookahead Implementation ---
         # 讓模型學習預測未來，以補償延遲

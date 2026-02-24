@@ -5,6 +5,7 @@ import json
 import shutil
 import os
 import traceback
+import concurrent.futures
 from tqdm import tqdm
 from ai.utils import Cv2VideoContext, EventsSampler, playfield_coords_to_screen, derive_capture_params, get_validated_input
 from ai.constants import RAW_DATA_DIR
@@ -103,7 +104,8 @@ class ReplayConverter:
             keys_sampler = EventsSampler(events_keys)
             
             print("Starting video frame processing...")
-            with Cv2VideoContext(self.danser_video) as ctx:
+            with Cv2VideoContext(self.danser_video) as ctx, \
+                 concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 8) as executor:
                 total_frames = int(ctx.cap.get(cv2.CAP_PROP_FRAME_COUNT))
                 fps = ctx.cap.get(cv2.CAP_PROP_FPS)
                 if fps == 0:
@@ -150,7 +152,8 @@ class ReplayConverter:
                     image_file_name = f"{self.project_name}-{round(current_time_ms)},{k1_str},{k2_str},{screen_x:.2f},{screen_y:.2f}.png"
                     image_path = os.path.join(self.save_dir, image_file_name)
                     
-                    cv2.imwrite(image_path, cropped_frame)
+                    # Submit imwrite to background thread, using level 1 compression for speed
+                    executor.submit(cv2.imwrite, image_path, cropped_frame, [cv2.IMWRITE_PNG_COMPRESSION, 1])
                     
                     loading_bar.update(1)
 
@@ -168,25 +171,24 @@ def start_convert():
     try:
         project_name = get_validated_input(
             'What Would You Like To Name This Project?: ', 
-            conversion_fn=lambda a: a.lower().strip()
+            is_valid=lambda a: True, # Any project name is valid as a string
+            convert=lambda a: a.lower().strip()
         )
         rendered_path = get_validated_input(
             'Path to the rendered replay video: ', 
-            validate_fn=lambda a: os.path.exists(a.strip()),
-            conversion_fn=lambda a: a.strip(), 
-            on_validation_error=lambda a: print("Invalid path!")
+            is_valid=lambda a: os.path.exists(a.strip()),
+            convert=lambda a: a.strip()
         )
         replay_json = get_validated_input(
             'Path to the replay JSON: ', 
-            validate_fn=lambda a: os.path.exists(a.strip()),
-            conversion_fn=lambda a: a.strip(), 
-            on_validation_error=lambda a: print("Invalid path!")
+            is_valid=lambda a: os.path.exists(a.strip()),
+            convert=lambda a: a.strip()
         )
 
         has_keys_json_str = get_validated_input(
             'Do you have a separate keys-only replay JSON? (y/n): ',
-            validate_fn=lambda a: a.strip().lower() in ['y', 'n'],
-            conversion_fn=lambda a: a.strip().lower()
+            is_valid=lambda a: a.strip().lower() in ['y', 'n'],
+            convert=lambda a: a.strip().lower()
         )
         has_keys_json = has_keys_json_str.startswith('y')
 
@@ -194,16 +196,14 @@ def start_convert():
         if has_keys_json:
             replay_keys_json = get_validated_input(
                 'Path to the keys-only replay JSON: ',
-                validate_fn=lambda a: os.path.exists(a.strip()),
-                conversion_fn=lambda a: a.strip(),
-                on_validation_error=lambda a: print("Invalid path!")
+                is_valid=lambda a: os.path.exists(a.strip()),
+                convert=lambda a: a.strip()
             )
 
         offset_ms = get_validated_input(
             "Offset in ms to apply to the dataset (e.g., -100, default is 0): ",
-            validate_fn=lambda a: not a.strip() or a.strip().lstrip('-+').isdigit(),
-            conversion_fn=lambda a: int(a.strip()) if a.strip() else 0,
-            on_validation_error=lambda a: print("It must be an integer or empty.")
+            is_valid=lambda a: not a.strip() or a.strip().lstrip('-+').isdigit(),
+            convert=lambda a: int(a.strip()) if a.strip() else 0
         )
         
         # 創建 ReplayConverter 實例時，只傳入它需要的參數

@@ -22,10 +22,10 @@ def get_acc(predicted: torch.Tensor, truth: torch.Tensor, thresh: int = 60, is_c
     """
     predicted = predicted.detach().clone()
     truth = truth.detach().clone()
-
-    predicted[:, 0] *= 1920
+    
+    predicted[:, 0] *= 1440 # 1920 * 0.75 (4:3 aspect ratio)
     predicted[:, 1] *= 1080
-    truth[:, 0] *= 1920
+    truth[:, 0] *= 1440
     truth[:, 1] *= 1080
 
     if is_combined:
@@ -76,7 +76,9 @@ def _train_model(project_name: str,
     training_dataset, validation_dataset = builder.get_train_val_datasets(val_split=0.1, random_seed=42)
     
     # 創建 DataLoader
-    # num_workers > 0 可以利用多核心加載數據，pin_memory=True 在使用 GPU 時可以加速數據轉移
+    # 因為 OsuLazyDataset 將整個 Numpy 陣列留在主記憶體，若在這裡開啟 num_workers，
+    # Windows 的 spawn 機制會試圖把好幾 GB 的陣列 Pickle 到子行程，導致 _pickle.UnpicklingError
+    # 我們的資料已經在 RAM 裡面了，不需要利用子行程去硬碟讀取，所以維持 num_workers=0 即可享受最快速度
     train_loader = DataLoader(training_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
     val_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
 
@@ -136,6 +138,7 @@ def _train_model(project_name: str,
                 for images, labels in val_bar:
                     images = images.to(PYTORCH_DEVICE, non_blocking=True)
                     labels = labels.to(PYTORCH_DEVICE, non_blocking=True)
+                    
                     outputs = model(images)
                     loss = criterion(outputs, labels)
                     
@@ -275,7 +278,7 @@ def start_train():
         train_config = get_train_data(model_type, all_datasets, available_models)
         
         # 這裡可以添加更多配置，如 batch_size, learning_rate 等
-        train_config['batch_size'] = 64
+        train_config['batch_size'] = 128
         train_config['learning_rate'] = 0.0001
         train_config['force_rebuild'] = False # 默認不強制重建
 

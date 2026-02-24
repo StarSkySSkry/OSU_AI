@@ -15,7 +15,7 @@ import numpy as np
 import torch
 import win32api
 import win32gui
-from mss import mss
+import dxcam
 from torch import Tensor, device
 from torch.nn import Module
 
@@ -24,6 +24,54 @@ from ai.constants import (DEFAULT_OSU_WINDOW, FINAL_PLAY_AREA_SIZE,
 from ai.enums import EModelType, EPlayAreaIndices
 from ai.utils import derive_capture_params
 
+
+def find_osu_window(base_name: str) -> int:
+    """Find the game window even if its title changes during gameplay (e.g. 'osu!  - Artist - Title')"""
+    hwnd = win32gui.FindWindow(None, base_name)
+    if hwnd != 0:
+        return hwnd
+    
+    found_hwnd = 0
+    def enum_windows_callback(h, lparam):
+        nonlocal found_hwnd
+        if win32gui.IsWindowVisible(h):
+            title = win32gui.GetWindowText(h)
+            if title.startswith(base_name):
+                found_hwnd = h
+                return False
+        return True
+    
+    try:
+        win32gui.EnumWindows(enum_windows_callback, 0)
+    except Exception:
+        pass
+    
+    return found_hwnd
+
+def get_dxcam_monitor_and_region(capture_params):
+    v_left, v_top = capture_params[EPlayAreaIndices.OffsetX.value], capture_params[EPlayAreaIndices.OffsetY.value]
+    v_width, v_height = capture_params[EPlayAreaIndices.Width.value], capture_params[EPlayAreaIndices.Height.value]
+    
+    monitors = win32api.EnumDisplayMonitors()
+    target_idx = 0
+    m_left, m_top = 0, 0
+    
+    # 找到視窗中心點所在的 Monitor
+    center_x = v_left + v_width // 2
+    center_y = v_top + v_height // 2
+    
+    for i, (hMonitor, hdcMonitor, monitorRect) in enumerate(monitors):
+        ml, mt, mr, mb = monitorRect
+        if ml <= center_x <= mr and mt <= center_y <= mb:
+            target_idx = i
+            m_left, m_top = ml, mt
+            break
+            
+    intra_left = int(v_left - m_left)
+    intra_top = int(v_top - m_top)
+    region = (intra_left, intra_top, intra_left + v_width, intra_top + v_height)
+    
+    return target_idx, region
 
 class EvalThread(Thread):
     def __init__(self, model_id: str, game_window_name: str = DEFAULT_OSU_WINDOW, eval_key: str = '\\'):
@@ -42,8 +90,9 @@ class EvalThread(Thread):
         raise NotImplementedError
 
     def _get_capture_params(self):
-        hwnd = win32gui.FindWindow(None, self.game_window_name)
+        hwnd = find_osu_window(self.game_window_name)
         if hwnd == 0:
+            print(f"[Warning] Could not find game window starting with '{self.game_window_name}'. Defaulting to primary monitor!")
             s_width = win32api.GetSystemMetrics(0)
             s_height = win32api.GetSystemMetrics(1)
             client_left = 0
@@ -86,19 +135,44 @@ class EvalThread(Thread):
         fps_counter = 0
         fps_timer = time.perf_counter()
 
-        with mss() as sct:
-            monitor = {"top": self.capture_params[EPlayAreaIndices.OffsetY.value],
-                       "left": self.capture_params[EPlayAreaIndices.OffsetX.value],
-                       "width": self.capture_params[EPlayAreaIndices.Width.value],
-                       "height": self.capture_params[EPlayAreaIndices.Height.value]}
+        monitor_idx, capture_region = get_dxcam_monitor_and_region(self.capture_params)
+        camera = dxcam.create(output_idx=monitor_idx, output_color="GRAY", region=capture_region)
 
+        # --- AI Inference Tracker ---
+        target_frame_time = 1.0 / 60.0  # Force 60 FPS inference loop
+        last_process_time = time.perf_counter()
+
+        try:
+            is_camera_running = False
+            
             while True:
                 if not self.eval:
+                    if is_camera_running:
+                        camera.stop()
+                        is_camera_running = False
+                        
+                    time.sleep(0.01) # reduce cpu load while waiting
+                    last_process_time = time.perf_counter() # Keep timer fresh
+                    continue
+                else:
+                    if not is_camera_running:
+                        camera.start(target_fps=0, video_mode=False) # Uncapped capture, NO buffering old frames
+                        is_camera_running = True
+                        last_process_time = time.perf_counter()
+
+                now = time.perf_counter()
+                if now - last_process_time < target_frame_time:
                     time.sleep(0.001)
                     continue
 
-                frame = np.array(sct.grab(monitor))
-                frame = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY), FINAL_PLAY_AREA_SIZE)
+                frame = camera.get_latest_frame()
+                if frame is None:
+                    time.sleep(0.001)
+                    continue
+                
+                last_process_time = now # Update only when we got a frame
+
+                frame = cv2.resize(frame, FINAL_PLAY_AREA_SIZE, interpolation=cv2.INTER_AREA)
 
                 needed = eval_model.channels - len(frame_buffer)
 
@@ -110,8 +184,10 @@ class EvalThread(Thread):
 
                 stacked = np.stack(frame_buffer, axis=0)
 
-                with torch.no_grad():
-                    tensor = torch.from_numpy(stacked).unsqueeze(0).float().div_(255.0)
+                with torch.inference_mode(): # Faster than no_grad
+                    # More efficient tensor creation
+                    tensor = torch.as_tensor(stacked, dtype=torch.float32).unsqueeze(0)
+                    tensor.div_(255.0) # In-place division
                     output = eval_model(tensor)
                     self.on_output(output)
 
@@ -120,9 +196,13 @@ class EvalThread(Thread):
                 now = time.perf_counter()
                 elapsed = now - fps_timer
                 if elapsed >= 2.0:
-                    print(f"[Eval] FPS: {fps_counter / elapsed:.1f}")
+                    fps = fps_counter / elapsed if elapsed > 0 else 0
+                    print(f"[Eval] FPS: {fps:.1f}")
                     fps_counter = 0
                     fps_timer = now
+        finally:
+            camera.stop()
+            del camera
 
     def toggle_eval(self):
         self.eval = not self.eval
@@ -209,8 +289,9 @@ class DualEvalThread(Thread):
         self.capture_params = []
 
     def _get_capture_params(self):
-        hwnd = win32gui.FindWindow(None, self.game_window_name)
+        hwnd = find_osu_window(self.game_window_name)
         if hwnd == 0:
+            print(f"[Warning] Could not find game window starting with '{self.game_window_name}'. Defaulting to primary monitor!")
             s_width = win32api.GetSystemMetrics(0)
             s_height = win32api.GetSystemMetrics(1)
             client_left = 0
@@ -259,20 +340,45 @@ class DualEvalThread(Thread):
         fps_counter = 0
         fps_timer = time.perf_counter()
 
-        with mss() as sct:
-            monitor = {"top": self.capture_params[EPlayAreaIndices.OffsetY.value],
-                       "left": self.capture_params[EPlayAreaIndices.OffsetX.value],
-                       "width": self.capture_params[EPlayAreaIndices.Width.value],
-                       "height": self.capture_params[EPlayAreaIndices.Height.value]}
+        monitor_idx, capture_region = get_dxcam_monitor_and_region(self.capture_params)
+        camera = dxcam.create(output_idx=monitor_idx, output_color="GRAY", region=capture_region)
+
+        # --- AI Inference Tracker ---
+        target_frame_time = 1.0 / 60.0  # Force 60 FPS inference loop
+        last_process_time = time.perf_counter()
+
+        try:
+            is_camera_running = False
 
             while True:
                 if not self.eval:
+                    if is_camera_running:
+                        camera.stop()
+                        is_camera_running = False
+                    
+                    time.sleep(0.01) # reduce cpu load while waiting
+                    last_process_time = time.perf_counter() # Keep timer fresh
+                    continue
+                else:
+                    if not is_camera_running:
+                        camera.start(target_fps=0, video_mode=False) # Uncapped capture, NO buffering old frames
+                        is_camera_running = True
+                        last_process_time = time.perf_counter()
+
+                now = time.perf_counter()
+                if now - last_process_time < target_frame_time:
                     time.sleep(0.001)
                     continue
 
                 # === 一次截圖，兩個模型共用 ===
-                frame = np.array(sct.grab(monitor))
-                frame = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY), FINAL_PLAY_AREA_SIZE)
+                frame = camera.get_latest_frame()
+                if frame is None:
+                    time.sleep(0.001)
+                    continue
+                
+                last_process_time = now # Update only when we got a frame
+
+                frame = cv2.resize(frame, FINAL_PLAY_AREA_SIZE, interpolation=cv2.INTER_AREA)
 
                 # --- Aim 推理 ---
                 needed = aim_model.channels - len(aim_buffer)
@@ -283,8 +389,9 @@ class DualEvalThread(Thread):
                     aim_buffer.append(frame)
 
                 aim_stacked = np.stack(aim_buffer, axis=0)
-                with torch.no_grad():
-                    aim_tensor = torch.from_numpy(aim_stacked).unsqueeze(0).float().div_(255.0)
+                with torch.inference_mode():
+                    aim_tensor = torch.as_tensor(aim_stacked, dtype=torch.float32).unsqueeze(0)
+                    aim_tensor.div_(255.0)
                     aim_output = aim_model(aim_tensor)
                     target_x, target_y = aim_output[0]
                     _move_mouse_absolute(self.capture_params, target_x.item(), target_y.item())
@@ -298,8 +405,9 @@ class DualEvalThread(Thread):
                     actions_buffer.append(frame)
 
                 actions_stacked = np.stack(actions_buffer, axis=0)
-                with torch.no_grad():
-                    actions_tensor = torch.from_numpy(actions_stacked).unsqueeze(0).float().div_(255.0)
+                with torch.inference_mode():
+                    actions_tensor = torch.as_tensor(actions_stacked, dtype=torch.float32).unsqueeze(0)
+                    actions_tensor.div_(255.0)
                     actions_output = actions_model(actions_tensor)
                     probs = torch.softmax(actions_output, dim=1)
                     predicted = torch.argmax(probs, dim=1)
@@ -321,6 +429,10 @@ class DualEvalThread(Thread):
                 now = time.perf_counter()
                 elapsed = now - fps_timer
                 if elapsed >= 2.0:
-                    print(f"[Dual] FPS: {fps_counter / elapsed:.1f}")
+                    fps = fps_counter / elapsed if elapsed > 0 else 0
+                    print(f"[Dual] FPS: {fps:.1f}")
                     fps_counter = 0
                     fps_timer = now
+        finally:
+            camera.stop()
+            del camera

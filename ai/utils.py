@@ -20,8 +20,23 @@ T = TypeVar("T")
 class Cv2VideoContext:
     def __init__(self, file_path: str):
         self.file_path = file_path
-        # 搜索找到 target_time_ms 所在的索引區間 [i-1, i]。
-        # 返回的元組代表用於插值的兩個事件的索引。
+        self.cap = None
+
+    def __enter__(self):
+        self.cap = cv2.VideoCapture(self.file_path)
+        if not self.cap.isOpened():
+            raise IOError(f"Cannot open video {self.file_path}")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.cap:
+            self.cap.release()
+
+class EventsSampler:
+    def __init__(self, events):
+        self.events = events
+        self.events_num = len(events)
+        self.event_times = [e['time'] for e in events]
         
     def _get_interp_indices(self, target_time_ms: float) -> tuple[int, int]:
         """
@@ -198,16 +213,16 @@ def playfield_coords_to_screen(
     """
     將 osu! 遊戲區域座標轉換為螢幕座標。
     """
-    # 縮放和平移
-    screen_x = (playfield_x * (screen_w / factory_w)) + (factory_dx * (screen_w / factory_w))
-    screen_y = (playfield_y * (screen_h / factory_h)) + (factory_dy * (screen_h / factory_h))
-    
-    # 如果最終的 AI 模型只需要在裁剪後的遊戲區域內移動，
-    # 我們需要減去裁剪區域的偏移量
     if account_for_capture_params:
         cap_w, cap_h, cap_dx, cap_dy = derive_capture_params(screen_w, screen_h)
-        screen_x -= cap_dx
-        screen_y -= cap_dy
+        # Map squarely into the 4:3 cropped region (e.g. 1440x1080)
+        # This keeps the output target directly inside the newly captured Bounding Box
+        screen_x = (playfield_x * (cap_w / factory_w)) + (factory_dx * (cap_w / factory_w))
+        screen_y = (playfield_y * (cap_h / factory_h)) + (factory_dy * (cap_h / factory_h))
+    else:
+        # 縮放和平移 (Full screen stretched)
+        screen_x = (playfield_x * (screen_w / factory_w)) + (factory_dx * (screen_w / factory_w))
+        screen_y = (playfield_y * (screen_h / factory_h)) + (factory_dy * (screen_h / factory_h))
 
     return [screen_x, screen_y, 0, 0] # 返回的 dx, dy 實際上已經被包含在 x, y 中了
 
