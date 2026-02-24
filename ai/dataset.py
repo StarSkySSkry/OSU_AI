@@ -37,27 +37,50 @@ LOOKAHEAD_BY_MODEL = {
 
 class OsuLazyDataset(Dataset):
     """
-    懶加載 Dataset：只存索引，__getitem__ 時從 chunk 中按需讀取。
-    完全不需要把圖像合併到一個大陣列中，零額外記憶體。
+    懶加載 Dataset：只存索引與路徑，__getitem__ 時從 chunk 中按需讀取。
+    完全繞開了 Windows DataLoader pickling 對 __init__ 巨型陣列的 2GB 限制。
     """
-    def __init__(self, builder, indices, label_type: EModelType):
-        self._builder = builder
+    def __init__(self, cumulative_lengths, image_paths, key_paths, coord_paths, indices, label_type: EModelType):
+        self._cumulative_lengths = cumulative_lengths
+        self._image_paths = image_paths
+        self._key_paths = key_paths
+        self._coord_paths = coord_paths
         self._indices = list(indices)
         self.label_type = label_type
+        
+        # 工作進程中才初始化的 lazy memmaps
+        self._image_chunks = None
+        self._key_chunks = None
+        self._coord_chunks = None
+
+    def _init_chunks(self):
+        if self._image_chunks is None:
+            self._image_chunks = [np.load(p, mmap_mode='r') for p in self._image_paths]
+            self._key_chunks = [np.load(p, mmap_mode='r') for p in self._key_paths]
+            self._coord_chunks = [np.load(p, mmap_mode='r') for p in self._coord_paths]
+
+    def _get_chunk_and_index(self, global_idx):
+        for chunk_idx in range(len(self._image_paths)):
+            start = self._cumulative_lengths[chunk_idx]
+            end = self._cumulative_lengths[chunk_idx + 1]
+            if start <= global_idx < end:
+                return chunk_idx, global_idx - start
+        raise IndexError(f"Index {global_idx} out of range [0, {self._cumulative_lengths[-1]})")
 
     def __getitem__(self, idx):
+        self._init_chunks()
         global_idx = self._indices[idx]
-        c, l = self._builder._get_chunk_and_index(global_idx)
+        c, l = self._get_chunk_and_index(global_idx)
         
-        image = self._builder._image_chunks[c][l].astype(np.float32)
+        image = self._image_chunks[c][l].astype(np.float32)
         
         if self.label_type == EModelType.Aim:
-            label = self._builder._coord_chunks[c][l]
+            label = self._coord_chunks[c][l]
         elif self.label_type == EModelType.Actions:
-            label = self._builder._key_chunks[c][l]
+            label = self._key_chunks[c][l]
         elif self.label_type == EModelType.Combined:
-            coords = self._builder._coord_chunks[c][l]
-            key = self._builder._key_chunks[c][l]
+            coords = self._coord_chunks[c][l]
+            key = self._key_chunks[c][l]
             k1 = np.float32(key == 2)
             k2 = np.float32(key == 1)
             label = np.concatenate([coords, [k1, k2]])
@@ -144,9 +167,7 @@ class OsuFrameProcessor:
                 # 使用 mmap_mode='r' 讓 Numpy 不載入 RAM 而是根據指針讀取磁碟
                 # 這允許我們在 Windows 系統下安全開啟 DataLoader 的 num_workers=4 進行多線程切片
                 images_data = np.load(images_path, mmap_mode='r')
-                keys_data = np.load(keys_path, mmap_mode='r')
-                coords_data = np.load(coords_path, mmap_mode='r')
-                return images_data, keys_data, coords_data
+                return images_path, keys_path, coords_path, len(images_data)
             except Exception as e:
                 print(f"Failed to load cached files {base_cache_name}. Rebuilding... Error: {e}")
 
@@ -155,7 +176,7 @@ class OsuFrameProcessor:
         files_to_load = os.listdir(raw_data_path)
         if not files_to_load:
             print(f"Warning: Dataset directory {raw_data_path} is empty.")
-            return np.array([]), np.array([]), np.array([])
+            return None, None, None, 0
             
         files_to_load.sort(key=lambda x: int(re.search(OsuFrameProcessor.FILE_REG_EXPR, x).groups()[0]))
         
@@ -245,7 +266,7 @@ class OsuFrameProcessor:
         np.save(coords_path, coords_np)
         
         # 返回新儲存且掛載 mmap_mode 的陣列，避免吃據 RAM
-        return np.load(images_path, mmap_mode='r'), np.load(keys_path, mmap_mode='r'), np.load(coords_path, mmap_mode='r')
+        return images_path, keys_path, coords_path, len(images_np)
 
 
 class OsuDatasetBuilder:
@@ -255,28 +276,29 @@ class OsuDatasetBuilder:
     """
     def __init__(self, datasets: list[str], label_type: EModelType, force_rebuild=False):
         self.label_type = label_type
-        self._image_chunks = []
-        self._key_chunks = []
-        self._coord_chunks = []
+        self._image_paths = []
+        self._key_paths = []
+        self._coord_paths = []
         self._cumulative_lengths = [0]
         
         lookahead = LOOKAHEAD_BY_MODEL.get(label_type, 3)
         print(f"Using lookahead={lookahead} for {label_type.name} model")
         
         for ds_name in datasets:
-            images, keys, coords = OsuFrameProcessor.process_raw_dataset(ds_name, lookahead=lookahead, force_rebuild=force_rebuild)
-            if len(images) > 0:
-                self._image_chunks.append(images)
-                self._key_chunks.append(keys)
-                self._coord_chunks.append(coords)
-                self._cumulative_lengths.append(self._cumulative_lengths[-1] + len(images))
+            res = OsuFrameProcessor.process_raw_dataset(ds_name, lookahead=lookahead, force_rebuild=force_rebuild)
+            if res[3] > 0:
+                img_p, key_p, coord_p, length = res
+                self._image_paths.append(img_p)
+                self._key_paths.append(key_p)
+                self._coord_paths.append(coord_p)
+                self._cumulative_lengths.append(self._cumulative_lengths[-1] + length)
         
         self._total_len = self._cumulative_lengths[-1]
-        print(f"Total samples loaded: {self._total_len} (across {len(self._image_chunks)} chunks)")
+        print(f"Total samples loaded: {self._total_len} (across {len(self._image_paths)} chunks)")
 
     def _get_chunk_and_index(self, global_idx):
         """將全局索引轉換為 (chunk_idx, local_idx)"""
-        for chunk_idx in range(len(self._image_chunks)):
+        for chunk_idx in range(len(self._image_paths)):
             start = self._cumulative_lengths[chunk_idx]
             end = self._cumulative_lengths[chunk_idx + 1]
             if start <= global_idx < end:
@@ -305,22 +327,30 @@ class OsuDatasetBuilder:
         val_indices = list(val_subset)
 
         # ------------------- 驗證集 -------------------
-        validation_dataset = OsuLazyDataset(self, val_indices, self.label_type)
+        validation_dataset = OsuLazyDataset(
+            self._cumulative_lengths, self._image_paths, self._key_paths, self._coord_paths, 
+            val_indices, self.label_type
+        )
         print(f"Validation set created with {len(validation_dataset)} samples.")
 
         # ------------------- 訓練集 -------------------
         if self.label_type == EModelType.Aim:
             # Aim: 回歸任務，不需要平衡
-            training_dataset = OsuLazyDataset(self, train_indices, self.label_type)
+            training_dataset = OsuLazyDataset(
+                self._cumulative_lengths, self._image_paths, self._key_paths, self._coord_paths, 
+                train_indices, self.label_type
+            )
         else:
             # Actions / Combined: 需要平衡按鍵分佈
             print("Balancing training set (index-only, no image copy)...")
             
             # 只收集按鍵標籤用於平衡（很小，幾十 KB）
+            # 建立暫時的 memmap 讀取 key
+            temp_key_chunks = [np.load(p, mmap_mode='r') for p in self._key_paths]
             train_keys = []
             for idx in train_indices:
                 c, l = self._get_chunk_and_index(idx)
-                train_keys.append(self._key_chunks[c][l])
+                train_keys.append(temp_key_chunks[c][l])
             train_keys = np.array(train_keys)
             
             # 對索引進行過採樣（不複製任何圖像資料！）
@@ -329,13 +359,16 @@ class OsuDatasetBuilder:
             resampled_idx_array, _ = ros.fit_resample(train_idx_array, train_keys)
             resampled_global_indices = resampled_idx_array.flatten().tolist()
             
-            training_dataset = OsuLazyDataset(self, resampled_global_indices, self.label_type)
+            training_dataset = OsuLazyDataset(
+                self._cumulative_lengths, self._image_paths, self._key_paths, self._coord_paths, 
+                resampled_global_indices, self.label_type
+            )
             
             # 打印平衡結果
             resampled_keys = []
             for gidx in resampled_global_indices:
                 c, l = self._get_chunk_and_index(gidx)
-                resampled_keys.append(self._key_chunks[c][l])
+                resampled_keys.append(temp_key_chunks[c][l])
             unique, counts = np.unique(resampled_keys, return_counts=True)
             balance_report = dict(zip(map(str, unique), counts))
             print("Final Training Dataset Balance:", balance_report)
