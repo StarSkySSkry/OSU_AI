@@ -47,7 +47,7 @@ class OsuAiModel(nn.Module):
         self.channels = channels
         self.model_type = model_type
         # 將模型名稱作為一個可配置的屬性
-        self.backbone_name = "efficientnet_b0" # 選擇一個高效且性能良好的模型
+        self.backbone_name = "efficientnet_b2" # 選擇一個特徵提取更強的模型
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # 基類中的 forward 應該被子類重寫

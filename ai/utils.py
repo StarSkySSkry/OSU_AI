@@ -164,6 +164,7 @@ refresh_model_list()
 
 def get_models(model_type: EModelType) -> list[dict]:
     """獲取指定類型的模型列表。"""
+    refresh_model_list()
     return _model_cache[model_type]
 
 def get_datasets() -> list[str]:
