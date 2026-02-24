@@ -188,13 +188,12 @@ class EvalThread(Thread):
                 stacked = np.stack(frame_buffer, axis=0)
 
                 with torch.inference_mode(): # Faster than no_grad
-                    # We send integer frames to GPU immediately, then cast to fp32/16 and divide IN GPU memory.
+                    # We send integer frames to GPU immediately, then cast to fp32 and divide IN GPU memory.
                     # This prevents the CPU from doing a massive 120x160x10 floating point array division!
                     tensor = torch.as_tensor(stacked, dtype=torch.uint8, device='cuda').unsqueeze(0)
-                    tensor = tensor.to(dtype=torch.float16).div_(255.0) 
+                    tensor = tensor.to(dtype=torch.float32).div_(255.0) 
                     
-                    with torch.autocast(device_type='cuda', dtype=torch.float16):
-                        output = eval_model(tensor)
+                    output = eval_model(tensor)
                         
                     # Move output back to CPU for mouse control / keypress matching
                     self.on_output(output.cpu())
