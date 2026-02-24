@@ -130,16 +130,25 @@ class OsuFrameProcessor:
         如果存在快取，則加載。如果不存在，則處理並保存快取。
         快取檔名包含 lookahead 值，不同設定互不覆蓋。
         """
-        processed_data_path = path.join(PROCESSED_DATA_DIR, f"{CURRENT_STACK_NUM}-{FINAL_PLAY_AREA_SIZE[0]}-la{lookahead}-{dataset_name}.npz")
+        # 我們現在使用 .npy 分開儲存以支援 mmap_mode (Memory Mapping)
+        # 這樣 PyTorch 的 num_workers=4 就不會把 4 份幾十 GB 的資料複製到 RAM 裡導致 OOM
+        base_cache_name = path.join(PROCESSED_DATA_DIR, f"{CURRENT_STACK_NUM}-{FINAL_PLAY_AREA_SIZE[0]}-la{lookahead}-{dataset_name}")
+        images_path = base_cache_name + "_images.npy"
+        keys_path = base_cache_name + "_keys.npy"
+        coords_path = base_cache_name + "_coords.npy"
         raw_data_path = path.join(RAW_DATA_DIR, dataset_name)
 
-        if not force_rebuild and path.exists(processed_data_path):
-            print(f"Loading cached processed dataset [{dataset_name}]...")
+        if not force_rebuild and path.exists(images_path) and path.exists(keys_path) and path.exists(coords_path):
+            print(f"Loading cached memory-mapped dataset [{dataset_name}]...")
             try:
-                data = np.load(processed_data_path)
-                return data['images'], data['keys'], data['coords']
+                # 使用 mmap_mode='r' 讓 Numpy 不載入 RAM 而是根據指針讀取磁碟
+                # 這允許我們在 Windows 系統下安全開啟 DataLoader 的 num_workers=4 進行多線程切片
+                images_data = np.load(images_path, mmap_mode='r')
+                keys_data = np.load(keys_path, mmap_mode='r')
+                coords_data = np.load(coords_path, mmap_mode='r')
+                return images_data, keys_data, coords_data
             except Exception as e:
-                print(f"Failed to load cached file {processed_data_path}. Rebuilding... Error: {e}")
+                print(f"Failed to load cached files {base_cache_name}. Rebuilding... Error: {e}")
 
         print(f"Processing raw dataset [{dataset_name}]...")
         
@@ -229,11 +238,14 @@ class OsuFrameProcessor:
         keys_np = np.array(keys_final, dtype=np.int64)
         coords_np = np.array(coords_final, dtype=np.float32)
         
-        print(f"Saving processed dataset [{dataset_name}]...")
-        # 使用壓縮存檔，更節省空間
-        np.savez_compressed(processed_data_path, images=images_np, keys=keys_np, coords=coords_np)
+        print(f"Saving uncompressed memory-map ready dataset [{dataset_name}]...")
+        # 分別存成獨立的 .npy 以支援 mmap
+        np.save(images_path, images_np)
+        np.save(keys_path, keys_np)
+        np.save(coords_path, coords_np)
         
-        return images_np, keys_np, coords_np
+        # 返回新儲存且掛載 mmap_mode 的陣列，避免吃據 RAM
+        return np.load(images_path, mmap_mode='r'), np.load(keys_path, mmap_mode='r'), np.load(coords_path, mmap_mode='r')
 
 
 class OsuDatasetBuilder:

@@ -76,11 +76,15 @@ def _train_model(project_name: str,
     training_dataset, validation_dataset = builder.get_train_val_datasets(val_split=0.1, random_seed=42)
     
     # 創建 DataLoader
-    # 因為 OsuLazyDataset 將整個 Numpy 陣列留在主記憶體，若在這裡開啟 num_workers，
-    # Windows 的 spawn 機制會試圖把好幾 GB 的陣列 Pickle 到子行程，導致 _pickle.UnpicklingError
-    # 我們的資料已經在 RAM 裡面了，不需要利用子行程去硬碟讀取，所以維持 num_workers=0 即可享受最快速度
-    train_loader = DataLoader(training_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
-    val_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
+    # 開啟 num_workers=4 並使用 prefetch_factor=2 可大幅舒緩 CPU 切割 Numpy 長陣列造成的 GPU 延遲
+    train_loader = DataLoader(
+        training_dataset, batch_size=batch_size, shuffle=True, 
+        num_workers=4, prefetch_factor=2, persistent_workers=True, pin_memory=True
+    )
+    val_loader = DataLoader(
+        validation_dataset, batch_size=batch_size, shuffle=False, 
+        num_workers=4, prefetch_factor=2, persistent_workers=True, pin_memory=True
+    )
 
     # 2. 模型、優化器、排程器初始化
     model = model_class.load(checkpoint_model_id).to(PYTORCH_DEVICE) if checkpoint_model_id else model_class().to(PYTORCH_DEVICE)
