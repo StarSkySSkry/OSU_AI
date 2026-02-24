@@ -25,13 +25,12 @@ KEY_STATES = {
 }
 
 # 每種模型類型使用不同的 lookahead（影格數）
-# Aim: 滑鼠移動連續平滑，可以預測較遠
-# Actions: 按鍵是瞬間事件，需要精準時機
-# Combined: 折衷
+# 此參數決定了 AI 預測未來多遠的座標以抵銷實戰操作與顯卡渲染的硬體延遲。
+# 訓練資料集 (Danser) 的幀率為 100 FPS (1 幀 = 10ms)。
 LOOKAHEAD_BY_MODEL = {
-    EModelType.Aim: 6,       # ~200ms @ 30fps
-    EModelType.Actions: 2,   # ~67ms @ 30fps
-    EModelType.Combined: 3,  # ~100ms @ 30fps
+    EModelType.Aim: 20,       # 預測未來 20 幀 = 200ms (徹底解決「膽小」與「滑條跟不上」)
+    EModelType.Actions: 5,    # 預測未來 5 幀 = 50ms 
+    EModelType.Combined: 15,  # 預測未來 15 幀 = 150ms
 }
 
 
