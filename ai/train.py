@@ -103,16 +103,23 @@ def _train_model(project_name: str,
             train_acc_sum = 0
             train_steps = 0
             
+            # 啟用混合精度訓練加速
+            scaler = torch.cuda.amp.GradScaler()
+            
             train_bar = tqdm(train_loader, desc="Training")
             for images, labels in train_bar:
                 images = images.to(PYTORCH_DEVICE, non_blocking=True)
                 labels = labels.to(PYTORCH_DEVICE, non_blocking=True)
 
                 optimizer.zero_grad()
-                outputs = model(images)
-                loss = criterion(outputs, labels)
-                loss.backward()
-                optimizer.step()
+                
+                with torch.autocast(device_type='cuda', dtype=torch.float16):
+                    outputs = model(images)
+                    loss = criterion(outputs, labels)
+                    
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
 
                 running_train_loss += loss.item() * images.size(0)
                 
@@ -138,9 +145,9 @@ def _train_model(project_name: str,
                 for images, labels in val_bar:
                     images = images.to(PYTORCH_DEVICE, non_blocking=True)
                     labels = labels.to(PYTORCH_DEVICE, non_blocking=True)
-                    
-                    outputs = model(images)
-                    loss = criterion(outputs, labels)
+                    with torch.autocast(device_type='cuda', dtype=torch.float16):
+                        outputs = model(images)
+                        loss = criterion(outputs, labels)
                     
                     running_val_loss += loss.item() * images.size(0)
                     
