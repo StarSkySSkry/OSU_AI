@@ -28,9 +28,9 @@ KEY_STATES = {
 # 此參數決定了 AI 預測未來多遠的座標以抵銷實戰操作與顯卡渲染的硬體延遲。
 # 訓練資料集 (Danser) 的幀率為 100 FPS (1 幀 = 10ms)。
 LOOKAHEAD_BY_MODEL = {
-    EModelType.Aim: 20,       # 預測未來 20 幀 = 200ms (徹底解決「膽小」與「滑條跟不上」)
-    EModelType.Actions: 5,    # 預測未來 5 幀 = 50ms 
-    EModelType.Combined: 15,  # 預測未來 15 幀 = 150ms
+    EModelType.Aim: 6,       # 預測未來 6 幀 = 60ms (完美抵銷 ~40ms 推理延遲)
+    EModelType.Actions: 2,   # 預測未來 2 幀 = 20ms 
+    EModelType.Combined: 3,  # 預測未來 3 幀 = 30ms
 }
 
 
