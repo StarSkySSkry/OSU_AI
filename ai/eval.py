@@ -218,32 +218,14 @@ class EvalThread(Thread):
 
 
 def _move_mouse_absolute(capture_params, target_x_percent, target_y_percent):
-    """將神經網路輸出的 80% 內縮座標，反向放大回 100% 真實螢幕座標。"""
+    """直接將滑鼠移動到目標螢幕座標。"""
     width = capture_params[EPlayAreaIndices.Width.value]
     height = capture_params[EPlayAreaIndices.Height.value]
     offset_x = capture_params[EPlayAreaIndices.OffsetX.value]
     offset_y = capture_params[EPlayAreaIndices.OffsetY.value]
 
-    # 神經網路學到的畫面是 Danser 輸出的（Playfield 縮小至 80%）
-    # 所以模型的輸出極限只會在 [0.1, 0.9] 之間。
-    # 如果直接乘以 width，滑鼠永遠點不到螢幕最邊緣（這就是「膽小」的原因）
-    # 我們需要將 [0.1, 0.9] 反向放大、映射回 [0.0, 1.0] 的真實螢幕空間
-    
-    # 1. 移回以 0.5 為中心的座標系
-    centered_x = target_x_percent - 0.5
-    centered_y = target_y_percent - 0.5
-    
-    # 2. 反向放大 (1 / 0.8 = 1.25)
-    scaled_x = centered_x * 1.25
-    scaled_y = centered_y * 1.25
-    
-    # 3. 移回以 0 為起點的座標系
-    final_x_percent = scaled_x + 0.5
-    final_y_percent = scaled_y + 0.5
-
-    # 4. 轉換為實體螢幕像素 (加上擷取區塊的螢幕偏移)
-    target_x = int((final_x_percent * width) + offset_x)
-    target_y = int((final_y_percent * height) + offset_y)
+    target_x = int((target_x_percent * width) + offset_x)
+    target_y = int((target_y_percent * height) + offset_y)
 
     ctypes.windll.user32.SetCursorPos(target_x, target_y)
 

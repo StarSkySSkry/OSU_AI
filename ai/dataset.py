@@ -10,6 +10,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 from ai.constants import CURRENT_STACK_NUM, FINAL_PLAY_AREA_SIZE, PROCESSED_DATA_DIR, RAW_DATA_DIR
+from ai.utils import derive_capture_params
 from collections import deque
 from torch.utils.data import Dataset, Subset
 from ai.enums import EModelType
@@ -98,18 +99,26 @@ class OsuFrameProcessor:
 
     @staticmethod
     def extract_info_from_state(state: str, dims: tuple[int, int]):
-        """從檔名中解析出按鍵和座標信息"""
+        """從檔名中解析出按鍵和相對座標信息"""
         width, height = dims
+        capture_w, capture_h, offset_x, offset_y = derive_capture_params(width, height)
+
         _, k1, k2, x_str, y_str = state.split(',')
         
         # 鍵盤狀態
         key_state = KEY_STATES.get(f"{k1}{k2}".strip(), 0)
         
-        # 座標歸一化
-        x = max(0, float(x_str.strip()))
-        y = max(0, float(y_str.strip()))
-        x_norm = x / width if x > 0 else 0
-        y_norm = y / height if y > 0 else 0
+        # 座標歸一化 (針對 DXCam 的 Capture Region)
+        x = float(x_str.strip())
+        y = float(y_str.strip())
+        
+        # 扣除位移，映射到裁切區域中
+        x_rel = x - offset_x
+        y_rel = y - offset_y
+        
+        # 安全截斷在 [0, 1] 以內
+        x_norm = max(0.0, min(1.0, x_rel / capture_w)) if capture_w > 0 else 0
+        y_norm = max(0.0, min(1.0, y_rel / capture_h)) if capture_h > 0 else 0
         
         mouse_state = np.array([x_norm, y_norm], dtype=np.float32)
         
@@ -118,10 +127,14 @@ class OsuFrameProcessor:
     @staticmethod
     def process_and_stack_frame(frame: np.ndarray, state: str, original_dims: tuple[int, int], frame_queue: deque):
         """
-        處理單個影格：resize -> 灰度 -> 歸一化 -> 解析信息 -> 堆疊
+        處理單個影格：計算捕獲區域 -> 裁切 -> resize -> 灰度 -> 歸一化 -> 解析信息 -> 堆疊
         """
-        # 1. Resize
-        resized_frame = cv2.resize(frame, FINAL_PLAY_AREA_SIZE, interpolation=cv2.INTER_AREA)
+        # 0. 裁切為 4:3 擷取區域，消除 16:9 被壓扁扭曲的變形問題
+        capture_w, capture_h, offset_x, offset_y = derive_capture_params(original_dims[0], original_dims[1])
+        frame_cropped = frame[offset_y:offset_y+capture_h, offset_x:offset_x+capture_w]
+
+        # 1. Resize (現在是 4:3 轉 4:3，比例完美契合)
+        resized_frame = cv2.resize(frame_cropped, FINAL_PLAY_AREA_SIZE, interpolation=cv2.INTER_AREA)
         
         # 2. 灰度化和歸一化
         gray_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2GRAY)
@@ -192,14 +205,22 @@ class OsuFrameProcessor:
                 if frame is None:
                     return None
                     
+                # 0. 裁切為 4:3 擷取區域
+                capture_w, capture_h, offset_x, offset_y = derive_capture_params(original_dims[0], original_dims[1])
+                frame_cropped = frame[offset_y:offset_y+capture_h, offset_x:offset_x+capture_w]
+                
                 # 1. Resize
-                resized_frame = cv2.resize(frame, FINAL_PLAY_AREA_SIZE, interpolation=cv2.INTER_AREA)
+                resized_frame = cv2.resize(frame_cropped, FINAL_PLAY_AREA_SIZE, interpolation=cv2.INTER_AREA)
                 
                 # 2. Grayscale & Normalize
                 gray_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2GRAY)
                 normalized_frame = (gray_frame / 255.0).astype(np.float32)
 
                 state_str = filename[:-4].split(os.sep)[-1]
+                
+                # 將 info 解析移交給 extract_info_from_state，那邊有統一的修正邏輯
+                # (在此預先解析座標只是為了看看 _worker 能否直接回傳)
+                # 其實在 _worker 階段只回傳檔名供後續轉換就夠了，但這裡為了對稱維持不變
                 return normalized_frame, state_str
             except Exception:
                 return None
