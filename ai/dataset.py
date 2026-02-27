@@ -231,62 +231,57 @@ class OsuFrameProcessor:
             processed_frames_data = list(tqdm(executor.map(_worker, files_to_load), total=len(files_to_load)))
 
         print(f"Stacking frames for [{dataset_name}]...")
-        for result in tqdm(processed_frames_data, total=len(processed_frames_data)):
-            if result is None:
-                continue
+        valid_data = [r for r in processed_frames_data if r is not None]
+        num_valid = len(valid_data)
+        num_stacked = num_valid - (CURRENT_STACK_NUM - 1)
+        n = num_stacked - lookahead
+        
+        if n > 0:
+            print("Allocating disk memory-map to prevent RAM OOM crash (streaming direct-to-disk)...")
+            images_np = np.lib.format.open_memmap(images_path, mode='w+', dtype=np.float16, shape=(n, CURRENT_STACK_NUM, FINAL_PLAY_AREA_SIZE[1], FINAL_PLAY_AREA_SIZE[0]))
+            
+            all_keys = []
+            all_coords = []
+            
+            write_idx = 0
+            for result in tqdm(valid_data, total=num_valid):
+                normalized_frame, state_str = result
+                key_state, mouse_state = OsuFrameProcessor.extract_info_from_state(state_str, original_dims)
                 
-            normalized_frame, state_str = result
-            
-            # --- 3. 解析檔名信息 ---
-            key_state, mouse_state = OsuFrameProcessor.extract_info_from_state(state_str, original_dims)
-            
-            # --- 4. 堆疊影格 ---
-            if len(frame_queue) < CURRENT_STACK_NUM - 1:
+                # --- 4. 堆疊影格 ---
+                if len(frame_queue) < CURRENT_STACK_NUM - 1:
+                    frame_queue.append(normalized_frame)
+                    continue
+                
+                all_frames = list(frame_queue) + [normalized_frame]
+                stacked = np.stack(all_frames, axis=0) # shape: (C, H, W)
                 frame_queue.append(normalized_frame)
-                continue
-            
-            all_frames = list(frame_queue) + [normalized_frame]
-            stacked = np.stack(all_frames, axis=0) # shape: (C, H, W)
-            
-            frame_queue.append(normalized_frame)
-            
-            all_stacked.append(stacked.astype(np.float16))
-            all_keys.append(key_state)
-            all_coords.append(mouse_state)
+                
+                if write_idx < n:
+                    # Stream directly to the hard drive to prevent 9GB RAM explosion
+                    images_np[write_idx] = stacked.astype(np.float16)
+                    write_idx += 1
+                
+                all_keys.append(key_state)
+                all_coords.append(mouse_state)
 
-        
-        # --- Lookahead Implementation ---
-        # 讓模型學習預測未來，以補償延遲
-        
-        if len(all_stacked) > lookahead:
-            # 圖像使用較早的影格，標籤使用較晚的影格
-            n = len(all_stacked) - lookahead
-            
-            # 增量建立陣列，邊複製邊釋放記憶體（避免雙倍記憶體峰值）
-            images_np = np.empty((n,) + all_stacked[0].shape, dtype=np.float16)
-            for i in range(n):
-                images_np[i] = all_stacked[i]
-                all_stacked[i] = None  # 釋放已複製的幀
-            del all_stacked  # 釋放列表
-            
+            # --- Lookahead Implementation ---
+            # 後移標籤來讓模型學習預測未來
             keys_final = all_keys[lookahead:]
             coords_final = all_coords[lookahead:]
+            
+            keys_np = np.array(keys_final[:n], dtype=np.int64)
+            coords_np = np.array(coords_final[:n], dtype=np.float32)
+            
+            print(f"Saving uncompressed memory-map ready dataset [{dataset_name}]...")
+            images_np.flush()
+            np.save(keys_path, keys_np)
+            np.save(coords_path, coords_np)
+            
+            return images_path, keys_path, coords_path, n
         else:
             print(f"Warning: Not enough frames in {dataset_name} to apply lookahead of {lookahead}. Skipping.")
-            images_np = np.array([], dtype=np.float16)
-            keys_final, coords_final = [], []
-
-        keys_np = np.array(keys_final, dtype=np.int64)
-        coords_np = np.array(coords_final, dtype=np.float32)
-        
-        print(f"Saving uncompressed memory-map ready dataset [{dataset_name}]...")
-        # 分別存成獨立的 .npy 以支援 mmap
-        np.save(images_path, images_np)
-        np.save(keys_path, keys_np)
-        np.save(coords_path, coords_np)
-        
-        # 返回新儲存且掛載 mmap_mode 的陣列，避免吃據 RAM
-        return images_path, keys_path, coords_path, len(images_np)
+            return None, None, None, 0
 
 
 class OsuDatasetBuilder:
