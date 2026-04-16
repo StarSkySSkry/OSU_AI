@@ -144,9 +144,13 @@ def refresh_model_list():
                         data = json.load(f)
                         model_type = EModelType[data['type']]
                         
+                        name = data.get('name', 'Unnamed Model')
+                        # 跳過中間 checkpoint（如 test7act13_ckpt_ep50）
+                        if '_ckpt_ep' in name:
+                            continue
                         payload = {
                             'id': model_id,
-                            'name': data.get('name', 'Unnamed Model'),
+                            'name': name,
                             'date': datetime.fromisoformat(data['date']),
                             'channels': data.get('channels', 'N/A'),
                             'datasets': data.get('datasets', [])
@@ -164,13 +168,36 @@ refresh_model_list()
 
 def get_models(model_type: EModelType) -> list[dict]:
     """獲取指定類型的模型列表。"""
+    refresh_model_list()
     return _model_cache[model_type]
 
 def get_datasets() -> list[str]:
-    """獲取所有原始數據集名稱（data/raw 下的子資料夾）。"""
-    if not path.exists(RAW_DATA_DIR):
-        return []
-    return [d for d in listdir(RAW_DATA_DIR) if path.isdir(path.join(RAW_DATA_DIR, d))]
+    """獲取所有數據集名稱 (聯集 raw 和 processed 的資料夾)。"""
+    datasets = set()
+    
+    # 1. 掃描 RAW_DATA_DIR
+    if path.exists(RAW_DATA_DIR):
+        for d in listdir(RAW_DATA_DIR):
+            if path.isdir(path.join(RAW_DATA_DIR, d)):
+                datasets.add(d)
+                
+    # 2. 掃描 PROCESSED_DATA_DIR (允許用戶刪除 raw 節省空間)
+    # 檔名格式: 10-160-la2-dataset_2025-07-22_19-47-18_images.npy
+    # 我們要提取出 dataset_2025-07-22_19-47-18 這個部分
+    import re
+    from ai.constants import PROCESSED_DATA_DIR
+    if path.exists(PROCESSED_DATA_DIR):
+        for f in listdir(PROCESSED_DATA_DIR):
+            if f.endswith('_images.npy'):
+                # 去掉結尾 _images.npy，再去掉開頭的 prefix (如 10-160-la2-)
+                base = f.replace('_images.npy', '')
+                # 用正則匹配 dataset_ 開頭的部分
+                match = re.search(r'(dataset_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})', base)
+                if match:
+                    datasets.add(match.group(1))
+                
+    return sorted(list(datasets))
+
 
 def run_in_subprocess(file_path: str) -> int:
     """
@@ -212,15 +239,28 @@ def playfield_coords_to_screen(
 ):
     """
     將 osu! 遊戲區域座標轉換為螢幕座標。
+    精準對應 Danser 的 Camera Projection (80% 縮放 + 8單位下移)。
     """
     if account_for_capture_params:
         cap_w, cap_h, cap_dx, cap_dy = derive_capture_params(screen_w, screen_h)
-        # Map squarely into the 4:3 cropped region (e.g. 1440x1080)
-        # This keeps the output target directly inside the newly captured Bounding Box
-        screen_x = (playfield_x * (cap_w / factory_w)) + (factory_dx * (cap_w / factory_w))
-        screen_y = (playfield_y * (cap_h / factory_h)) + (factory_dy * (cap_h / factory_h))
+        
+        # 1. 取得 Danser 基礎縮小比例 (Playfield 佔螢幕高 0.8 倍)
+        base_scale = cap_h / factory_h
+        if (factory_w / factory_h) > (cap_w / cap_h):
+            base_scale = cap_w / factory_w
+        scl = base_scale * 0.8
+        
+        # 2. 將原點移至中心
+        origin_x, origin_y = -factory_w/2, -factory_h/2
+        
+        # 3. Y 軸固定偏移 8 單位 (為血條留空間)
+        shift_y = 8 * scl
+        
+        # 4. 投影到 Capture 擷取框內的相對座標
+        screen_x = (playfield_x + origin_x) * scl + cap_w/2
+        screen_y = (playfield_y + origin_y) * scl + cap_h/2 + shift_y
     else:
-        # 縮放和平移 (Full screen stretched)
+        # Full screen stretched (舊版相容或全螢幕)
         screen_x = (playfield_x * (screen_w / factory_w)) + (factory_dx * (screen_w / factory_w))
         screen_y = (playfield_y * (screen_h / factory_h)) + (factory_dy * (screen_h / factory_h))
 

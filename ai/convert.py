@@ -149,11 +149,11 @@ class ReplayConverter:
                     k1_str = "1" if keys_bool[0] else "0"
                     k2_str = "1" if keys_bool[1] else "0"
                     
-                    image_file_name = f"{self.project_name}-{round(current_time_ms)},{k1_str},{k2_str},{screen_x:.2f},{screen_y:.2f}.png"
+                    image_file_name = f"{self.project_name}-{round(current_time_ms)},{k1_str},{k2_str},{screen_x:.2f},{screen_y:.2f}.jpg"
                     image_path = os.path.join(self.save_dir, image_file_name)
                     
-                    # Submit imwrite to background thread, using level 1 compression for speed
-                    executor.submit(cv2.imwrite, image_path, cropped_frame, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+                    # Submit imwrite to background thread, JPEG quality=90 (省 ~85% 空間，不影響訓練)
+                    executor.submit(cv2.imwrite, image_path, cropped_frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
                     
                     loading_bar.update(1)
 
