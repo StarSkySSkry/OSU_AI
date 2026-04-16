@@ -144,9 +144,13 @@ def refresh_model_list():
                         data = json.load(f)
                         model_type = EModelType[data['type']]
                         
+                        name = data.get('name', 'Unnamed Model')
+                        # 跳過中間 checkpoint（如 test7act13_ckpt_ep50）
+                        if '_ckpt_ep' in name:
+                            continue
                         payload = {
                             'id': model_id,
-                            'name': data.get('name', 'Unnamed Model'),
+                            'name': name,
                             'date': datetime.fromisoformat(data['date']),
                             'channels': data.get('channels', 'N/A'),
                             'datasets': data.get('datasets', [])
@@ -168,10 +172,32 @@ def get_models(model_type: EModelType) -> list[dict]:
     return _model_cache[model_type]
 
 def get_datasets() -> list[str]:
-    """獲取所有原始數據集名稱（data/raw 下的子資料夾）。"""
-    if not path.exists(RAW_DATA_DIR):
-        return []
-    return [d for d in listdir(RAW_DATA_DIR) if path.isdir(path.join(RAW_DATA_DIR, d))]
+    """獲取所有數據集名稱 (聯集 raw 和 processed 的資料夾)。"""
+    datasets = set()
+    
+    # 1. 掃描 RAW_DATA_DIR
+    if path.exists(RAW_DATA_DIR):
+        for d in listdir(RAW_DATA_DIR):
+            if path.isdir(path.join(RAW_DATA_DIR, d)):
+                datasets.add(d)
+                
+    # 2. 掃描 PROCESSED_DATA_DIR (允許用戶刪除 raw 節省空間)
+    # 檔名格式: 10-160-la2-dataset_2025-07-22_19-47-18_images.npy
+    # 我們要提取出 dataset_2025-07-22_19-47-18 這個部分
+    import re
+    from ai.constants import PROCESSED_DATA_DIR
+    if path.exists(PROCESSED_DATA_DIR):
+        for f in listdir(PROCESSED_DATA_DIR):
+            if f.endswith('_images.npy'):
+                # 去掉結尾 _images.npy，再去掉開頭的 prefix (如 10-160-la2-)
+                base = f.replace('_images.npy', '')
+                # 用正則匹配 dataset_ 開頭的部分
+                match = re.search(r'(dataset_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})', base)
+                if match:
+                    datasets.add(match.group(1))
+                
+    return sorted(list(datasets))
+
 
 def run_in_subprocess(file_path: str) -> int:
     """

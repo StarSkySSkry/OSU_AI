@@ -27,15 +27,15 @@ def start_play(eval_key: str = '\\'):
 
             # 選擇 Aim 模型
             prompt = "Select Aim model (mouse control):\n"
-            for i in range(len(aim_models)):
-                prompt += f"    [{i}] {aim_models[i]}\n"
+            for i, m in enumerate(aim_models):
+                prompt += f"    [{i}] {m['name']}  ({m['date'].strftime('%Y-%m-%d %H:%M')})\n"
             aim_idx = get_validated_input(prompt, lambda a: a.strip().isnumeric() and (
                     0 <= int(a.strip()) < len(aim_models)), lambda a: int(a.strip()))
 
             # 選擇 Actions 模型
             prompt = "Select Actions model (key control):\n"
-            for i in range(len(action_models)):
-                prompt += f"    [{i}] {action_models[i]}\n"
+            for i, m in enumerate(action_models):
+                prompt += f"    [{i}] {m['name']}  ({m['date'].strftime('%Y-%m-%d %H:%M')})\n"
             action_idx = get_validated_input(prompt, lambda a: a.strip().isnumeric() and (
                     0 <= int(a.strip()) < len(action_models)), lambda a: int(a.strip()))
 
@@ -51,8 +51,8 @@ def start_play(eval_key: str = '\\'):
             active_model = None
             if user_choice == 0:
                 prompt = "What aim model would you like to use?\n"
-                for i in range(len(aim_models)):
-                    prompt += f"    [{i}] {aim_models[i]}\n"
+                for i, m in enumerate(aim_models):
+                    prompt += f"    [{i}] {m['name']}  ({m['date'].strftime('%Y-%m-%d %H:%M')})\n"
 
                 model_index = get_validated_input(prompt, lambda a: a.strip().isnumeric() and (
                         0 <= int(a.strip()) < len(aim_models)), lambda a: int(a.strip()))
@@ -61,8 +61,8 @@ def start_play(eval_key: str = '\\'):
 
             elif user_choice == 1:
                 prompt = "What actions model would you like to use?\n"
-                for i in range(len(action_models)):
-                    prompt += f"    [{i}] {action_models[i]}\n"
+                for i, m in enumerate(action_models):
+                    prompt += f"    [{i}] {m['name']}  ({m['date'].strftime('%Y-%m-%d %H:%M')})\n"
 
                 model_index = get_validated_input(prompt, lambda a: a.strip().isnumeric() and (
                         0 <= int(a.strip()) < len(action_models)), lambda a: int(a.strip()))
@@ -71,8 +71,8 @@ def start_play(eval_key: str = '\\'):
                     model_id=action_models[model_index]['id'], eval_key=eval_key)
             else:
                 prompt = "What combined model would you like to use?\n"
-                for i in range(len(combined_models)):
-                    prompt += f"    [{i}] {combined_models[i]}\n"
+                for i, m in enumerate(combined_models):
+                    prompt += f"    [{i}] {m['name']}  ({m['date'].strftime('%Y-%m-%d %H:%M')})\n"
 
                 model_index = get_validated_input(prompt, lambda a: a.strip().isnumeric() and (
                         0 <= int(a.strip()) < len(combined_models)), lambda a: int(a.strip()))
